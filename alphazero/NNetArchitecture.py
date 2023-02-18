@@ -50,6 +50,7 @@ class ResidualBlock(nn.Module):
         self.bn2 = nn.BatchNorm2d(out_channels)
         self.conv2 = conv3x3(out_channels, out_channels)
 
+
     def forward(self, x):
         residual = x
         out = x
@@ -72,6 +73,8 @@ class ResNet(nn.Module):
         # game params
         self.channels, self.board_x, self.board_y = game_cls.observation_size()
         self.action_size = game_cls.action_size()
+        self.vst         = args.value_softmax_temperature
+        self.pst         = args.policy_softmax_temperature
 
         self.conv1 = conv3x3(self.channels, args.num_channels)
         self.bn1 = nn.BatchNorm2d(args.num_channels)
@@ -117,7 +120,7 @@ class ResNet(nn.Module):
         pi = torch.flatten(pi, 1)
         pi = self.pi_fc(pi)
 
-        return F.log_softmax(pi, dim=1), F.log_softmax(v, dim=1)
+        return F.log_softmax(pi/self.pst, dim=1), F.log_softmax(v/self.vst, dim=1)
 
 
 class FullyConnected(nn.Module):
@@ -130,6 +133,8 @@ class FullyConnected(nn.Module):
         super(FullyConnected, self).__init__()
         # get input size
         self.input_size = np.prod(game_cls.observation_size())
+        self.vst        = args.value_softmax_temperature
+        self.pst        = args.policy_softmax_temperature
 
         self.input_fc = mlp(
             self.input_size,
@@ -158,4 +163,4 @@ class FullyConnected(nn.Module):
         v = self.v_fc(s)
         pi = self.pi_fc(s)
 
-        return F.log_softmax(pi, dim=1), F.log_softmax(v, dim=1)
+        return F.log_softmax(pi/self.pst, dim=1), F.log_softmax(v/self.vst, dim=1)

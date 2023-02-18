@@ -129,6 +129,7 @@ cdef class MCTS:
     cdef public int depth
     cdef public int max_depth
     cdef public int _discount_max_depth
+    cdef public int canonical_state
 
     def __init__(self, args: dotdict):
         self.root_noise_frac = args.root_noise_frac
@@ -143,6 +144,7 @@ cdef class MCTS:
         self.depth = 0
         self.max_depth = 0
         self._discount_max_depth = 0
+        self.canonical_state = args.mctsCanonicalStates
 
     def __repr__(self):
         return 'MCTS(root_noise_frac={}, root_temp={}, min_discount={}, fpu_reduction={}, cpuct={}, _num_players={}, ' \
@@ -169,7 +171,15 @@ cdef class MCTS:
 
         for _ in range(sims):
             leaf = self.find_leaf(gs)
-            p, v = nn(leaf.observation())
+            p, tv = nn(leaf.observation())
+            v = np.zeros_like(tv)
+            if self.canonical_state:
+                v[leaf._player] = tv[0]
+                v[1-leaf._player] = tv[1]
+                v[2]  = tv[2]
+            else:
+                v = tv
+
             self.process_results(leaf, v, p, add_root_noise, add_root_temp)
 
     cpdef void raw_search(self, object gs, int sims, bint add_root_noise, bint add_root_temp):

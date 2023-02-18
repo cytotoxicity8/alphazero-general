@@ -56,7 +56,7 @@ def saveIterationSamples(iteration, output, game_cls):
         policy_tensor[i] = torch.from_numpy(policy)
         value_tensor[i] = torch.from_numpy(value)
 
-    folder = "HumanData/"
+    folder = "data/human/"
     filename = os.path.join(folder, get_iter_file(iteration).replace('.pkl', ''))
     if not os.path.exists(folder): os.makedirs(folder)
 
@@ -71,8 +71,8 @@ def main():
     assert(BOARD_SIZE == 13)
     data = []
     totalMoves = 0
-    with open('games.csv') as games:
-        with open('moves.csv') as moves:
+    with open('data/hex/games.csv') as games:
+        with open('data/hex/moves.csv') as moves:
             # skip past unnecessary headers
             games.readline()
             moves.readline() 

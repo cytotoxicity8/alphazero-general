@@ -86,13 +86,15 @@ cdef class GameState:
         """Get an observation from the game state in the form of a numpy array with the size of self.observation_size"""
         pass
 
-    cpdef list symmetries(self, float[:] pi):
+    cpdef list symmetries(self, float[:] pi, float[:] value):
         """
         Args:
             pi: the current policy for the given canonical state
+            value : The outcome of the game, needs to be changed if players swap for example
+              Most of the time will be the same
 
         Returns:
-            symmetries: list of state, pi pairs for symmetric samples of
+            symmetries: list of state, pi, value tripples for symmetric samples of
                         the given state and pi (ex: mirror, rotation).
                         This is an optional method as symmetric samples
                         can be disabled for training.

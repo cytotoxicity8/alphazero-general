@@ -185,14 +185,14 @@ class SelfPlayAgent(mp.Process):
                         for hist in self.histories[i]:
                             self._check_pause()
                             if self.args.symmetricSamples:
-                                data = hist[0].symmetries(hist[1])
+                                data = hist[0].symmetries(hist[1], winstate)
                             else:
-                                data = ((hist[0], hist[1]),)
+                                data = ((hist[0], hist[1], winstate),)
 
-                            for state, pi in data:
+                            for state, pi, true_winstate in data:
                                 self._check_pause()
                                 self.output_queue.put((
-                                    state.observation(), pi, np.array(winstate, dtype=np.float32)
+                                    state.observation(), pi, np.array(true_winstate, dtype=np.float32)
                                 ))
                     self.games[i] = self.game_cls()
                     self.histories[i] = []

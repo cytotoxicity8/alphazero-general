@@ -27,4 +27,4 @@ cdef class GameState:
     cpdef void play_action(self, int action)
     cpdef np.ndarray win_state(self)
     cpdef float[:, :, :] observation(self)
-    cpdef list symmetries(self, float[:] pi)
+    cpdef list symmetries(self, float[:] pi, float[:] value)

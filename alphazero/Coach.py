@@ -54,6 +54,19 @@ DEFAULT_ARGS = dotdict({
     'numWarmupIters': 1,  # Iterations where games are played randomly, 0 for none
     'skipSelfPlayIters': None,
     'selfPlayModelIter': None,
+    # This will let the MCTS search know that you are using canonical states (i.e all
+    #   states are from the perspective of one player). It will then interpret the value
+    #   vector returned from the neural network differently. It will go from :
+    #     (ℙ(Player 1 wins), ℙ(Player 2 wins),ℙ(Draw)) to
+    #     (ℙ(Player about to play wins), ℙ(Other player wins),ℙ(Draw))
+    # Note this shouldn't affect the output of win_state, however should change the output
+    #  of symmetry (i.e. when you call game.win_state() you should still get [0,1,0] if Player
+    #  2 wins but when you call symmetry you should get [1,0,0] if player 2 wins and it's player
+    #  2's turn
+    'mctsCanonicalStates': False,
+    'policy_softmax_temperature': 1.4,
+    'value_softmax_temperature': 1.4,
+
     'symmetricSamples': True,
     'numMCTSSims': 100,
     'numFastSims': 20,
@@ -217,6 +230,10 @@ class Coach:
         else:
             self.writer = SummaryWriter()
         # self.args.expertValueWeight.current = self.args.expertValueWeight.start
+        if self.args.mctsCanonicalStates:
+            assert self.args.symmetricSamples, "Counting who has won with cannonical state representation of board requires symetries to get win_state into correct form"
+
+
     def _load_model(self, model, iteration):
         model.load_checkpoint(
             folder=os.path.join(self.args.checkpoint, self.args.run_name),
@@ -233,7 +250,9 @@ class Coach:
         print('Because of batching, it can take a long time before any games finish.')
 
         try:
-
+            print("-----args-------")
+            for i,j in self.args.items():
+                print("\"{}\" : {},".format(i,j))
             while self.model_iter <= self.args.numIters:
                 print(f'------ITER {self.model_iter}------')
 
