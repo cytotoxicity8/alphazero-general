@@ -15,9 +15,9 @@ BASE_SIZE = OBSERVATION_BOARD_SIZE * OBSERVATION_BOARD_SIZE * NUM_CHANNELS
 args = get_args(dotdict({
     'run_name': 'hex_{0}x{0}_observing_{1}x{1}x{2}_Canonical_NoSwap'.format(BOARD_SIZE, OBSERVATION_BOARD_SIZE, NUM_CHANNELS),
     'workers': mp.cpu_count(),
-    'startIter': 1,
+    'startIter': 0,
     'numIters': 100,
-    'numWarmupIters': 2,
+    'numWarmupIters': 3,
     "num_stacked_observations" : 1,
     'process_batch_size': 256,
     'train_batch_size': 256,
