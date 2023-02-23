@@ -56,7 +56,7 @@ def saveIterationSamples(iteration, output, game_cls):
         policy_tensor[i] = torch.from_numpy(policy)
         value_tensor[i] = torch.from_numpy(value)
 
-    folder = "data/human/"
+    folder = "data/human4layers"
     filename = os.path.join(folder, get_iter_file(iteration).replace('.pkl', ''))
     if not os.path.exists(folder): os.makedirs(folder)
 
@@ -69,7 +69,7 @@ def saveIterationSamples(iteration, output, game_cls):
 
 def main():
     assert(BOARD_SIZE == 13)
-    data = []
+    data = [[], [], [], [], [], [], [], [], [], [], [], [], [], []]
     totalMoves = 0
     with open('data/hex/games.csv') as games:
         with open('data/hex/moves.csv') as moves:
@@ -111,61 +111,66 @@ def main():
 
                 if boardSize == 13 and len(moveList) > 2 and (r1 > 1200 or r2 > 1200):
                     totalMoves += len(moveList)
-                    data.append((gID, result, r1, r2, moveList))
+                    data[(max(int(r1),int(r2))-1200)//100].append((gID, result, r1, r2, moveList))
                 game = games.readline()
     #print(totalMoves/len(data))
-    #print(data)
-    maximum = 2600
-    for i in range(1000, 2600, 200):
-        databetween = list(filter(lambda x: max(x[2],x[3])>= i and max(x[2],x[3])< i+200, data))
-        print("num data points between {} and {} is {}".format(i, i+200, len(databetween)))
-    assert False
+    #print(len(data))
+    #maximum = 2600
+    for i in data:
+        print(len(i))
+    #for i in range(1000, 2600, 200):
+    #    databetween = list(filter(lambda x: max(x[2],x[3])>= i and max(x[2],x[3])< i+200, data))
+    #    print("num data points between {} and {} is {}".format(i, i+200, len(databetween)))
+    
+    # sort by max of the 2 ratings
+    #data.sort(key = lambda x: max(x[2],x[3]))
+    #assert False
     #print(max(map(lambda x : x[2], data)))
     #print(max(map(lambda x : x[3], data)))
+    
     print("Loaded")
     game_cls = Game
-    n = 0
-    outs = [mp.Queue(), mp.Queue(), mp.Queue(), mp.Queue(), mp.Queue(), mp.Queue(), mp.Queue(), mp.Queue()]
-    for gID, result, r1, r2, moveList in data:
-        n+=1
-        #if (n < 6) : continue
-        #print(n)
-        g = game_cls()
-        
-        winstate = np.array([result == 2,result == 0,False])
-        #print(winstate)
-        out = outs[(max(int(r1),int(r2))-1200)//200]
-        for move in moveList:
-            #print(move)
-            #print(g._board)
-            if (move == (-10, -10)):
-                trueMove = 13*13
-            else:
-                if CANONICAL_STATE and g._player == 1:
-                    move = g._board.pairflipInXPlusYCorrection(move)
-                trueMove = move[1] * 13 + move[0]
-            assert (trueMove>=0 and trueMove<=13*13)
-            # Maybe Add noise?
-            pi = np.zeros(13*13+1, dtype=np.float32)
-            pi[trueMove] = 1
-
-            #----------------------
-            data = g.symmetries(pi, winstate)
-            for state, pi, true_winstate in data:
-                #print(state.observation(), pi, np.array(true_winstate, dtype=np.float32))
-                out.put((
-                    state.observation(), pi, np.array(true_winstate, dtype=np.float32)
-                ))
-            g.play_action(trueMove)
+    i = 0
+    for data1 in data:
+        print(len(data1))
+        out = mp.Queue()
+        n = 0
+        for gID, result, r1, r2, moveList in data1:
+            n+=1
+            #if (n < 6) : continue
+            #print(n)
+            g = game_cls()
             
-        if n%100 == 0:
-            print('.', end = '', flush=True)
-        if n%5000 == 0:
-            print()
-        
-    for i in range(0,len(outs)):
-        saveIterationSamples(i, outs[i], game_cls)
-        #print(outs[i])
+            winstate = np.array([result == 2,result == 0,False])
+            #print(winstate)
+            for move in moveList:
+                #print(move)
+                #print(g._board)
+                if (move == (-10, -10)):
+                    trueMove = 13*13
+                else:
+                    if CANONICAL_STATE and g._player == 1:
+                        move = g._board.pairflipInXPlusYCorrection(move)
+                    trueMove = move[1] * 13 + move[0]
+                assert (trueMove>=0 and trueMove<=13*13)
+                # Maybe Add noise?
+                pi = np.zeros(13*13+1, dtype=np.float32)
+                pi[trueMove] = 1
+
+                #----------------------
+                data = g.symmetries(pi, winstate)
+                for state, pi, true_winstate in data:
+                    #print(state.observation(), pi, np.array(true_winstate, dtype=np.float32))
+                    out.put((
+                        state.observation(), pi, np.array(true_winstate, dtype=np.float32)
+                    ))
+                g.play_action(trueMove)
+            if n%100 == 0:
+                print('.', end = '', flush=True)
+            if n%5000 == 0:
+                print()
+        saveIterationSamples(i, out, game_cls)
+        i +=1
 
 
 if __name__ == "__main__":

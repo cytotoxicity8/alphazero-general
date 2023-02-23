@@ -1,3 +1,4 @@
+import numpy as np
 class dotdict(dict):
     def __getattr__(self, name):
         if name.startswith('__'):
@@ -12,8 +13,8 @@ class dotdict(dict):
         return self.__class__(data)
 
 
-def get_iter_file(iteration: int):
-    return f'iteration-{iteration:04d}.pkl'
+def get_iter_file(number: int, iteration: int):
+    return f'{number:02d}-iteration-{iteration:04d}.pkl'
 
 
 def scale_temp(scale_factor: float, min_temp: float, cur_temp: float, turns: int, const_max_turns: int) -> float:
@@ -31,27 +32,30 @@ def const_temp_scaling(temp, *args, **kwargs) -> float:
     return temp
 
 
-def get_game_results(result_queue, game_cls, _get_index=None):
+def get_game_results(numberOfCompetingNets, result_queue, game_cls, _get_index=None):
     player_to_index = {p: i for i, p in enumerate(range(game_cls.num_players()))}
 
     num_games = result_queue.qsize()
-    wins = [0] * game_cls.num_players()
-    draws = 0
-    game_len_sum = 0
+    wins = np.zeros([numberOfCompetingNets] * game_cls.num_players() + [game_cls.num_players()])
+    draws = np.zeros([numberOfCompetingNets] * game_cls.num_players())
+    game_len_sum = np.zeros([numberOfCompetingNets] * game_cls.num_players())
 
     for _ in range(num_games):
-        state, winstate, agent_id = result_queue.get()
-        game_len_sum += state.turns
+        state, winstate, agent_id, players = result_queue.get()
+        temp = list(players)
+        temp.sort()
+        players = tuple(temp)
+        game_len_sum[players] += state.turns
 
         for player, is_win in enumerate(winstate):
             if is_win:
                 if player == len(wins):
-                    draws += 1
+                    draws[players] += 1
                 else:
                     index = _get_index(player, agent_id) if _get_index else player_to_index[player]
-                    wins[index] += 1
+                    wins[players][index] += 1
 
-    return wins, draws, game_len_sum / num_games if num_games else 0
+    return wins, draws, game_len_sum / num_games if num_games else game_len_sum
 
 
 def plot_mcts_tree(mcts, max_depth=2):

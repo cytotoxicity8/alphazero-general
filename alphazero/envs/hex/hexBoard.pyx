@@ -58,7 +58,7 @@ RED_PLAYER = 2
 GREEN_PLAYER = 3
 ERROR = -10
 SWAP  = -9
-SWAP_MOVE = True
+SWAP_MOVE = False
 CHECK_FOR_EDGE_TEMPLATES_INTERNAL = False
             # Brdige, Wheel, Ziggurat, III1b, IV1a, 
 vcsToCheck = [False,   False,  False,    False, False]

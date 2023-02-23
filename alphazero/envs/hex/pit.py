@@ -30,23 +30,23 @@ if __name__ == '__main__':
     #player1 = 
     # nnet players
     nn1 = NNet(Game, args)
-    nn1.load_checkpoint('./checkpoint/hex_13x13_observing_13x13x1_1200PlusHumanData', 'iteration-0004.pkl')
-    nn2 = nn1
-    #nn2 = NNet(Game, args)
-    #nn2.load_checkpoint('./checkpoint/hex_7x7_observing_7x7x1_BenchmarkSpeedFlipping', 'iteration-0003.pkl')
+    nn1.load_checkpoint('./checkpoint/hex_7x7_observing_7x7x1_Canonical_NoSwap', 'iteration-0019.pkl')
+    #nn2 = nn1
+    nn2 = NNet(Game, args)
+    nn2.load_checkpoint('./checkpoint/hex_7x7_observing_7x7x1_Canonical_NoSwap', 'iteration-0026.pkl')
     #player1 = nn1
     #player2 = nn1.process
 
     #player1 = NNPlayer(nn=nn1, game_cls=Game,  args=args, verbose=True)
     #player2 = NNPlayer(nn=nn2, game_cls=Game,  args=args, verbose=True)
-    player1 = MCTSPlayer(game_cls=Game, nn=nn2, args=args, verbose=True)#, draw_mcts=True, draw_depth=3)
+    player1 = MCTSPlayer(game_cls=Game, nn=nn1, args=args, verbose=True)#, draw_mcts=True, draw_depth=3)
     #args2 = args.copy()
     #args2.numMCTSSims = 10
-    #player2 = MCTSPlayer(game_cls=Game, nn=nn2, args=args)
+    player2 = MCTSPlayer(game_cls=Game, nn=nn2, args=args, verbose=True)
     #player2 = RandomPlayer()
     #player2 = RawMCTSPlayer(Game, args)
-    player2 = GTPPlayer()
-    players = [player1,player2]
+    #player2 = GTPPlayer()
+    players = [player2,player1]
     arena = Arena(players, Game, use_batched_mcts=False, args=args, display=display)
 
     

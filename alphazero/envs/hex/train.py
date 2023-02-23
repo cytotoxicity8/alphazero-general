@@ -13,20 +13,21 @@ import cProfile
 BASE_SIZE = OBSERVATION_BOARD_SIZE * OBSERVATION_BOARD_SIZE * NUM_CHANNELS
 
 args = get_args(dotdict({
-    'run_name': 'hex_{0}x{0}_observing_{1}x{1}x{2}_PastTrain'.format(BOARD_SIZE, OBSERVATION_BOARD_SIZE, NUM_CHANNELS),
+    'run_name': 'hex_{0}x{0}_observing_{1}x{1}x{2}_Canonical_NoSwap'.format(BOARD_SIZE, OBSERVATION_BOARD_SIZE, NUM_CHANNELS),
     'workers': mp.cpu_count(),
     'startIter': 1,
     'numIters': 100,
-    'numWarmupIters': 0,
+    'numWarmupIters': 2,
     "num_stacked_observations" : 1,
-    'process_batch_size': 16,
-    'train_batch_size': 128,
+    'process_batch_size': 256,
+    'train_batch_size': 256,
     # should preferably be a multiple of process_batch_size and workers
-    'gamesPerIteration': 128 * mp.cpu_count(),
+    'gamesPerIteration': 512 * mp.cpu_count(),
     '_num_players' : 2,
     'symmetricSamples': True,
     'train_on_past_data' : False,
-    'past_data_run_name' : "hex_5x5_observing_5x5x1"
+    'past_data_run_name' : "human4Layers",
+    'past_data_chunk_size': 2,
     'skipSelfPlayIters': None,
     'selfPlayModelIter': None,
     'mctsCanonicalStates': CANONICAL_STATE, 
@@ -45,7 +46,7 @@ args = get_args(dotdict({
     'compareWithPast': True,
     'pastCompareFreq': 0.5,
     'cpuct': 5,
-    'fpu_reduction': 0.4,
+    'fpu_reduction': 0,
     'load_model': True,
 }),
     model_gating=True,
@@ -57,8 +58,6 @@ args = get_args(dotdict({
     depth=12,
     value_head_channels=32,
     policy_head_channels=32,
-    value_dense_layers=[1024, 256],
-    policy_dense_layers=[1024]
 )
 args.scheduler_args.milestones = [75, 150]
 

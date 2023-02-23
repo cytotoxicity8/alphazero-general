@@ -10,13 +10,20 @@ import time
 from alphazero.MCTS import MCTS
 
 
+
 class SelfPlayAgent(mp.Process):
-    def __init__(self, id, game_cls, ready_queue, batch_ready, batch_tensor, policy_tensor,
+    def __init__(self, id, whoVwhoComputing, game_cls, ready_queue, batch_ready, batch_tensor, policy_tensor,
                  value_tensor, output_queue, result_queue, complete_count, games_played,
                  stop_event: mp.Event, pause_event: mp.Event(), args, _is_arena=False, _is_warmup=False):
         super().__init__()
         self.id = id
+        self.numPer = whoVwhoComputing[0]
+        self.listToCompute = whoVwhoComputing[1]
+        self.numStarted = 0
+        self.numRunsDone = 0
+
         self.game_cls = game_cls
+        self.numPlayers = game_cls.num_players()
         self.ready_queue = ready_queue
         self.batch_ready = batch_ready
         self.batch_tensor = batch_tensor
@@ -33,6 +40,7 @@ class SelfPlayAgent(mp.Process):
         self.temps = []
         self.next_reset = []
         self.mcts = []
+        self.netsGoing = [0 for _ in range(0, len(self.listToCompute))]
         self.games_played = games_played
         self.complete_count = complete_count
         self.stop_event = stop_event
@@ -52,12 +60,10 @@ class SelfPlayAgent(mp.Process):
             value_size = game_cls.num_players() + 1
             self._WARMUP_VALUE = torch.full((value_size,), 1 / value_size).to(policy_tensor.device)
         self.fast = False
+
         for _ in range(self.batch_size):
-            self.games.append(self.game_cls())
-            self.histories.append([])
-            self.temps.append(self.args.startTemp)
-            self.next_reset.append(0)
-            self.mcts.append(self._get_mcts())
+            self.addNextToCompute()
+        #print(len(self.netsGoing[0]))
 
     def _get_mcts(self):
         if self._is_arena:
@@ -75,6 +81,42 @@ class SelfPlayAgent(mp.Process):
     def _check_pause(self):
         while self.pause_event.is_set():
             time.sleep(.1)
+
+    def addNextToCompute(self, i = None):
+        self.netsGoing[(self.numStarted//self.numPer) % len(self.netsGoing)] +=1
+        if i == None:
+            self.games.append(self.game_cls())
+            self.histories.append([])
+            self.temps.append(self.args.startTemp)
+            self.next_reset.append(0)
+            self.mcts.append(self._get_mcts())
+        else:
+            self.games[i]      = (self.game_cls())
+            self.histories[i]  = []
+            self.temps[i]      = self.args.startTemp
+            self.next_reset[i] = 0
+            self.mcts[i]       = self._get_mcts()
+
+        self.numStarted +=1
+
+    def getNetIndex(self, index):
+        cumulative = 0
+        for i in range(0,len(self.netsGoing)):
+            cumulative += self.netsGoing[i]
+            if cumulative > index:
+                return i
+        return len(self.netsGoing)
+
+    def removeFromComputing(self, index):
+        i = self.getNetIndex(index)
+        self.netsGoing[i] -= 1
+        
+        del (self.games[index])
+        del (self.histories[index])
+        del (self.mcts[index])
+        del (self.temps[index])
+        del (self.next_reset[index])
+
 
     def run(self):
         try:
@@ -132,12 +174,13 @@ class SelfPlayAgent(mp.Process):
             self.batch_indices = list(itertools.chain.from_iterable(self.batch_indices))
 
         if not self._is_warmup:
-            self.ready_queue.put(self.id)
+            self.ready_queue.put((self.id, self.netsGoing, self.numRunsDone % self.numPlayers))
 
     def processBatch(self):
         if not self._is_warmup:
             self.batch_ready.wait()
             self.batch_ready.clear()
+            self.numRunsDone +=1
 
         for i in range(self.batch_size):
             self._check_pause()
@@ -151,11 +194,17 @@ class SelfPlayAgent(mp.Process):
             )
 
     def playMoves(self):
-        for i in range(self.batch_size):
+        toRem = []
+        offset = 0 
+        for j in range(self.batch_size):
+            i = j - offset
+            #print(i)
+            #print(self.games[i]._board.pieces)
             self._check_pause()
             self.temps[i] = self.args.temp_scaling_fn(
                 self.temps[i], self.games[i].turns, self.game_cls.max_turns()
             ) if not self._is_arena else self.args.arenaTemp
+            #print(self.temps[i])
             policy = self._mcts(i).probs(self.games[i], self.temps[i])
             action = np.random.choice(self.games[i].action_size(), p=policy)
             if not self.fast and not self._is_arena:
@@ -174,8 +223,10 @@ class SelfPlayAgent(mp.Process):
                 self.next_reset[i] = self.games[i].turns + self.args.mctsResetThreshold
 
             winstate = self.games[i].win_state()
+            #print(winstate)
             if winstate.any():
-                self.result_queue.put((self.games[i].clone(), winstate, self.id))
+                #print(i)
+                self.result_queue.put((self.games[i].clone(), winstate, self.id, self.listToCompute[self.getNetIndex(i)]))
                 lock = self.games_played.get_lock()
                 lock.acquire()
                 if self.games_played.value < self.args.gamesPerIteration:
@@ -194,9 +245,31 @@ class SelfPlayAgent(mp.Process):
                                 self.output_queue.put((
                                     state.observation(), pi, np.array(true_winstate, dtype=np.float32)
                                 ))
-                    self.games[i] = self.game_cls()
+                    toRem.append(i)
+                    """self.games[i] = self.game_cls()
+                    nextJobs = self.work_to_do_queue.get()
+                    # To make sure next step is taken by nextJobs[0]
+                    base = self.numRunsDone%self.numPlayers
+                    for player in range(0,self.numPlayers):
+                        self.netsGoing[(player+self.numRunsDone)%self.numPlayers][i] = nextJobs[player]
+
                     self.histories[i] = []
                     self.temps[i] = self.args.startTemp
-                    self.mcts[i] = self._get_mcts()
+                    self.mcts[i] = self._get_mcts()"""
                 else:
                     lock.release()
+
+        toRem.reverse()
+        #print("before")
+        #for i in self.games:
+        #    print(i._board.pieces)
+        #print(toRem)
+        for i in toRem:
+            self.removeFromComputing(i)
+
+        #print("after")
+        #for i in self.games:
+        #    print(i._board.pieces)
+
+        for i in toRem:
+            self.addNextToCompute()

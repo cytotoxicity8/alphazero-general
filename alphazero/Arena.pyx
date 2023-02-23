@@ -144,7 +144,7 @@ class Arena:
             state: the last state in the game
             result: the value of the game result (based on last state)
         """
-        #if verbose: assert self.display
+        if verbose: assert self.display
 
         self.stop_event = mp.Event()
         self.pause_event = mp.Event()
@@ -171,8 +171,8 @@ class Arena:
             [p.update(self.game_state, action) for p in self.players]
             self.game_state.play_action(action)
 
-            # if verbose:
-            #     self.display(self.game_state, action)
+            if verbose:
+                self.display(self.game_state, action)
             
             winstate = self.game_state.win_state()
 

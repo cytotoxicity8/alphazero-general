@@ -306,9 +306,11 @@ cdef class MCTS:
     cpdef int[:] counts(self, object gs):
         cdef int[:] counts = np.zeros(gs.action_size(), dtype=np.int32)
         cdef Node c
-
+        #print(self._root)
+        #print(self._root._children)
         for c in self._root._children:
             counts[c.a] = c.n
+        #print(np.asarray(counts))
         return np.asarray(counts)
 
     cpdef int best_action(self, object gs):
@@ -326,7 +328,8 @@ cdef class MCTS:
             return probs
 
         try:
-            probs = (counts / np.sum(counts)) ** (1.0 / temp)
+            tempScaled = (1.0 / temp)
+            probs = (counts / np.sum(counts)) ** tempScaled
             probs /= np.sum(probs)
             return probs
         except OverflowError:

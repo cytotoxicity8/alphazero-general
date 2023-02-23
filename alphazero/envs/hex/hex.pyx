@@ -19,15 +19,16 @@ import numpy as np
 
 NUM_PLAYERS             = 2
 #MULTI_PLANE_OBSERVATION = False
-BOARD_SIZE              = 13
+BOARD_SIZE              = 7
 OBSERVATION_BOARD_SIZE  = BOARD_SIZE
 MAX_TURNS               = BOARD_SIZE*BOARD_SIZE + 1
-CHANNEL_DICT            = {"OnlyBoard" : 1, "BasicOneHot" : 3, "OneHotTurn" : 4}
+CHANNEL_DICT            = {"OnlyBoard" : 1, "BoardAndTurn" :2, "BasicOneHot" : 3, "OneHotTurn" : 4}
 NUM_CHANNELS            = CHANNEL_DICT.get("OnlyBoard")
             
 # This determines weather we do the flip on the board when it's red's turn to make them
 #   appear the same
 CANONICAL_STATE = True
+SWAP_MOVE = False
 
 class Game(GameState):
     def __init__(self):
@@ -77,8 +78,7 @@ class Game(GameState):
         ret = self._board.getPossibleMoves()
         if CANONICAL_STATE and self._player == 1:
             ret = np.flipud(np.fliplr(np.transpose(np.reshape(ret, (BOARD_SIZE, BOARD_SIZE))))).ravel()
-
-        return np.append(ret,(1 if self._turns == 1 else 0))
+        return np.append(ret,(1 if (self._turns == 1 and SWAP_MOVE) else 0))
 
 
     def play_action(self, action: int) -> None:
@@ -129,7 +129,14 @@ class Game(GameState):
             else:
                 return np.expand_dims(ret, axis=0)
         
-        #if NUM_CHANNELS == 2:
+        if NUM_CHANNELS == 2:
+            colourFlipper = lambda x : 1*(x==1) + (-1)*(x==2) + x*(x!=1 and x!=2)
+            ret = np.vectorize(colourFlipper)(np.reshape(self._board.board, (BOARD_SIZE+2,BOARD_SIZE+2)))
+            turn = np.full_like(ret, colourFlipper(me))
+            if OBSERVATION_BOARD_SIZE == BOARD_SIZE:
+                return np.array([np.delete(np.delete(turn,[0,-1],1),[0,-1],0), np.delete(np.delete(ret,[0,-1],1),[0,-1],0)])
+            else:
+                return np.array([turn, ret])
 
         if NUM_CHANNELS == 3:
             # Base structure, the default layers are 
@@ -154,21 +161,21 @@ class Game(GameState):
             else:
                 return np.array([blank,mine,yours])
         if NUM_CHANNELS == 4:
-            # 0/1/2/3 Empty/BluePieces/RedPieces/Turn 
+            # 0/1/2/3 Turn/Empty/BluePieces/RedPieces 
             #  Turn will just be a full layer of who's turn it is (0 for blue 1 for red)
-            b = np.reshape(self._board.board, (BOARD_SIZE+2,BOARD_SIZE+2))
+            b      = np.reshape(self._board.board, (BOARD_SIZE+2,BOARD_SIZE+2))
             blank  = np.where(b == 0, 1, 0)
             blues  = np.where(b == BLUE_PLAYER, 1, 0)
             reds   = np.where(b == RED_PLAYER, 1, 0)
             turns  = np.full((BOARD_SIZE+2,BOARD_SIZE+2), self._player)
 
             if OBSERVATION_BOARD_SIZE == BOARD_SIZE:
-                return np.array([np.delete(np.delete(blank,[0,-1],1),[0,-1],0), 
+                return np.array([np.delete(np.delete(turns,[0,-1],1),[0,-1],0),
+                                 np.delete(np.delete(blank,[0,-1],1),[0,-1],0), 
                                  np.delete(np.delete(blues,[0,-1],1),[0,-1],0),
-                                 np.delete(np.delete(reds,[0,-1],1),[0,-1],0),
-                                 np.delete(np.delete(turns,[0,-1],1),[0,-1],0)])
+                                 np.delete(np.delete(reds, [0,-1],1),[0,-1],0)])
             else:
-                return np.array([blank,blues,reds, turns])
+                return np.array([turns,blank,blues,reds])
 
         else:
             raise ValueError('NUM_CHANNELS in hex.pyx is not set to an appropriate value')
@@ -231,4 +238,4 @@ class Game(GameState):
 
 
 def display(board, action=None):
-    print(board)
+    print(board._board)
