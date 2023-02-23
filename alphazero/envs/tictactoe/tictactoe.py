@@ -80,7 +80,7 @@ class Game(GameState):
     def observation(self):
         return np.expand_dims(np.asarray(self._board.pieces), axis=0).astype(np.float32)
 
-    def symmetries(self, pi: np.ndarray) -> List[Tuple[Any, int]]:
+    def symmetries(self, pi: np.ndarray, winstate) -> List[Tuple[Any, int]]:
         # mirror, rotational
         assert (len(pi) == self._board.n ** 2)
 
@@ -97,7 +97,7 @@ class Game(GameState):
 
                 gs = self.clone()
                 gs._board.pieces = new_b
-                result.append((gs, new_pi.ravel()))
+                result.append((gs, new_pi.ravel(), winstate))
 
         return result
 

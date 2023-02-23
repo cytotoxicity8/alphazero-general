@@ -93,10 +93,10 @@ class Game(GameState):
         else:
             return np.expand_dims(np.asarray(self._board.pieces), axis=0)
 
-    def symmetries(self, pi) -> List[Tuple[Any, int]]:
+    def symmetries(self, pi, winstate) -> List[Tuple[Any, int]]:
         new_state = self.clone()
         new_state._board.pieces = self._board.pieces[:, ::-1]
-        return [(self.clone(), pi), (new_state, pi[::-1])]
+        return [(self.clone(), pi, winstate), (new_state, pi[::-1], winstate)]
 
 
 def display(board, action=None):

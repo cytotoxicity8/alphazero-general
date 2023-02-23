@@ -7,11 +7,11 @@ from alphazero.envs.tictactoe.tictactoe import Game
 
 args = get_args(
     run_name='tictactoe',
-    workers=7,
+    workers=2,
     cpuct=2,
     numMCTSSims=25,
     probFastSim=0.5,
-    numWarmupIters=1,
+    numWarmupIters=0,
     baselineCompareFreq=5,
     pastCompareFreq=5,
     arenaBatchSize=512,
