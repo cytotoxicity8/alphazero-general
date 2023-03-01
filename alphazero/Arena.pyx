@@ -15,7 +15,7 @@ import torch
 import random
 import time
 
-
+##
 class _PlayerStats:
     def __init__(self, index):
         self.index = index
@@ -144,7 +144,7 @@ class Arena:
             state: the last state in the game
             result: the value of the game result (based on last state)
         """
-        if verbose: assert self.display
+        #if verbose: assert self.display
 
         self.stop_event = mp.Event()
         self.pause_event = mp.Event()
@@ -251,10 +251,7 @@ class Arena:
                     value_tensors[i].pin_memory()
 
                 self._agents.append(
-                    SelfPlayAgent(i, self.game_cls, ready_queue, batch_ready[i],
-                                  input_tensors, policy_tensors[i], value_tensors[i], batch_queues[i],
-                                  result_queue, completed, games_played, self.stop_event, self.pause_event, self.args,
-                                  _is_arena=True))
+                    SelfPlayAgent(i, (100000000, [(0,0)]), self.game_cls, ready_queue, batch_ready[i], input_tensors, policy_tensors[i], value_tensors[i], batch_queues[i], result_queue, completed, games_played, self.stop_event, self.pause_event, self.args, _is_arena=True))
                 self._agents[i].daemon = True
                 self._agents[i].start()
 
@@ -264,7 +261,7 @@ class Arena:
             n = 0
             while completed.value != self.args.workers:
                 try:
-                    id = ready_queue.get(timeout=1)
+                    id,_,_ = ready_queue.get(timeout=1)
 
                     policy = []
                     value = []
@@ -272,7 +269,7 @@ class Arena:
                     for player in range(len(self.players)):
                         batch = data[player]
                         if not isinstance(batch, list):
-                            p, v = self.players[player].process(batch)
+                            p, v = (self.players[player]).process(batch)
                             policy.append(p.to(policy_tensors[id].device))
                             value.append(v.to(value_tensors[id].device))
 
@@ -288,11 +285,15 @@ class Arena:
                     n = size
                     end = time.time()
 
-                wins, draws, _ = get_game_results(
+                wins, draws, _ = get_game_results(1,
                     result_queue,
                     self.game_cls,
                     _get_index=lambda p, i: self._agents[i].player_to_index[p]
                 )
+
+                for i in range(0, self.game_cls.num_players()):
+                    wins, draws = wins[0], draws[0]
+
                 for i, w in enumerate(wins):
                     self.__player_stats[i].wins += w
                 self.draws += draws

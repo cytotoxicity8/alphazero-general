@@ -3,7 +3,7 @@ from numpy import get_include
 pyxinstall(setup_args={'include_dirs': get_include()})
 
 from alphazero.SelfPlayAgent import SelfPlayAgent
-from alphazero.utils import get_iter_file, dotdict, get_game_results, default_temp_scaling
+from alphazero.utils import get_iter_file, dotdict, get_game_results, default_temp_scaling, default_const_args
 from alphazero.Arena import Arena
 from alphazero.GenericPlayers import RawMCTSPlayer, NNPlayer, MCTSPlayer
 from alphazero.pytorch_classification.utils import Bar, AverageMeter
@@ -22,6 +22,14 @@ import torch
 import pickle
 import os
 import itertools
+
+class ModeOfGameGen(Enum):
+    # Where n = numPlayers; 
+    
+    # For all i1, ..., in there will be an equal number of games (i1,...,in)
+    CROSS_PRODUCT  = 0
+    # Each worker will uniformly at random get assigned an i1, ..., in  and they will compute only those games
+    ONE_PER_WORKER = 1
 
 DEFAULT_ARGS = dotdict({
     'run_name': 'boardgame',
@@ -67,6 +75,34 @@ DEFAULT_ARGS = dotdict({
     'mctsCanonicalStates': False,
     'policy_softmax_temperature': 1.4,
     'value_softmax_temperature': 1.4,
+
+    # Weather to use population to train hyperparameters
+    'withPopulation' : False,
+    # See the above enum - defines what games each worker will compute in self play
+    'modeOfAssigningWork' : ModeOfGameGen.ONE_PER_WORKER,
+    # The number of individuals in the population
+    'populationSize' : 1,
+    # A function that given an id of a memeber of the population (from 0 to populationSize - 1)
+    #  that returns the trainable arguments to start that instance on
+    'getInitialArgs' : default_const_args,
+    # How often a roundRobin is done to optimize hyperparameters
+    'roundRobinFreq' : 5,
+    # If true then the round robin will take place by replacing a self play session
+    #  every roundRobinFreq number of steps
+    'roundRobinAsSelfPlay' : True,
+    # Ignored if roundRobinAsSelfPlay
+    # Number of games played between each net in the round robin
+    #  note populationSize^2 * (num below) games will be played in total
+    'roundRobinGames' : 6,
+    # The %age of the nets that will be killed
+    #  They will be from the bottom of the round robin
+    'percentageKilled' : 0.2,
+    # Which net to use for compare to baseline and elo
+    #  If none will start with a round robin to calc best
+    'bestNet' : None,
+    # Defines the max deviation from original values that can happen when a new models is created
+    'deviation' : 0.2,
+
 
     'symmetricSamples': True,
     'numMCTSSims': 100,
@@ -142,8 +178,13 @@ def get_args(args=None, **kwargs):
         new_args.update(args)
     for key, value in kwargs.items():
         setattr(new_args, key, value)
-    return new_args
 
+    if new_args.mctsCanonicalStates:
+        assert new_args.symmetricSamples, "Counting who has won with cannonical state representation of board requires symetries to get win_state into correct form"
+
+    assert new_args.model_gating, "Currently there is a silent bug without Model Gating so don't use unless searching for that bug"
+
+    return new_args
 
 class TrainState(Enum):
     STANDBY = 0
@@ -156,6 +197,7 @@ class TrainState(Enum):
     TRAIN = 7
     COMPARE_BASELINE = 8
     COMPARE_PAST = 9
+    ROUND_ROBIN = 10
 
 
 def _set_state(state: TrainState):
@@ -174,39 +216,58 @@ class Coach:
     def __init__(self, game_cls, nnet, args):
         np.random.seed()
         self.game_cls = game_cls
-        self.train_nets = [nnet]
-        self.self_play_nets = [nnet.__class__(game_cls, args)]
-        self.elo_play_nets = [nnet.__class__(game_cls, args)]
-        self.elo_play_net_2s = [nnet.__class__(game_cls, args)]
+        self.numNets = args.populationSize if args.withPopulation else 1
+        self.train_nets = np.full(self.numNets, None)
+        self.self_play_nets = np.full(self.numNets, None)
+        
+        self.elo_play_net = nnet.__class__(game_cls, args)
+        self.elo_play_net_2 = nnet.__class__(game_cls, args)
         self.args = args
         self.args._num_players = self.game_cls.num_players() + self.game_cls.has_draw()
-        self.numNets = 1
-        train_iter = self.args.startIter
-        self.trainableArgs = [self.get_trainable_attributes(self.args)]
+        self.args.bestNet  = self.args.bestNet if args.withPopulation else 0
 
+        for i in range(0, self.numNets):
+            argsi = args.copy()
+            #print(args.getInitialArgs(i))
+            argsi.update(args.getInitialArgs(i))
+
+            self.train_nets[i]      = nnet.__class__(game_cls, argsi)
+            self.self_play_nets[i]  = nnet.__class__(game_cls, argsi)
+
+        
+        train_iter = self.args.startIter
+        self.trainableArgs = None if not(args.withPopulation) else set(self.args.getInitialArgs(0).keys())
+        self.argsNotToCheck = {'startIter'}
         if self.args.load_model:
             networks = sorted(glob(self.args.checkpoint + '/' + self.args.run_name + '/*'))
             self.args.startIter = len(networks)//self.numNets
             if self.args.startIter == 0:
-                self._save_model(self.train_nets, 0, 0)
+                for net in range(0, self.numNets):
+                    self._save_model(self.train_nets[net], 0, net)
                 self.args.startIter = 1
 
             train_iter = self.args.startIter - 1
-            self._load_model(self.train_nets, train_iter, 0)
+            for net in range(0, self.numNets): 
+                self._load_model(self.train_nets[net], train_iter, net)
             del networks
 
-        if self.args.selfPlayModelIter == 0:
-            self.self_play_iter = [0]
-        else:
-            self.self_play_iter = [self.args.selfPlayModelIter or train_iter]
+        self.self_play_iter = np.full(self.numNets, 0)
+
+        for net in range(0, self.numNets):
+            if self.train_nets[i].args.selfPlayModelIter == 0:
+                self.self_play_iter[net] = 0
+            else:
+                self.self_play_iter[net] = self.train_nets[i].args.selfPlayModelIter or train_iter
 
         if self.args.model_gating:
-            self._load_model(self.self_play_nets, self.self_play_iter[0],0)
+            for net in range(0, self.numNets):
+                self._load_model(self.self_play_nets[net], self.self_play_iter[net],net)
         
-        self.gating_counter = [0]
+
+        self.gating_counter = np.zeros(self.numNets)
         self.warmup = False
-        self.loss_pi = 0
-        self.loss_v = 0
+        self.loss_pis = np.zeros(self.numNets)
+        self.loss_vs = np.zeros(self.numNets)
         self.sample_time = 0
         self.iter_time = 0
         self.eta = 0
@@ -217,11 +278,13 @@ class Coach:
         self.policy_tensors = []
         self.value_tensors = []
         self.batch_ready = []
+        self.games_for_agent = []
         self.stop_train = mp.Event()
         self.pause_train = mp.Event()
         self.stop_agents = mp.Event()
-        self.train_nets[0].stop_train = self.stop_train
-        self.train_nets[0].pause_train = self.pause_train
+        for net in range(0, self.numNets):
+            self.train_nets[net].stop_train = self.stop_train
+            self.train_nets[net].pause_train = self.pause_train
         self.ready_queue = mp.Queue()
         self.file_queue = mp.Queue()
         self.result_queue = mp.Queue()
@@ -232,31 +295,27 @@ class Coach:
         else:
             self.writer = SummaryWriter()
         # self.args.expertValueWeight.current = self.args.expertValueWeight.start
-        if self.args.mctsCanonicalStates:
-            assert self.args.symmetricSamples, "Counting who has won with cannonical state representation of board requires symetries to get win_state into correct form"
 
-    # Returns smaller dot dictionary of all attributes that can be learned
+    # Returns smaller dot dictionary of all attributes that can be learned and their vals in current dict
     def get_trainable_attributes(self, args : dotdict) -> dotdict:
-        return dotdict({'cpuct': args.cpuct})
+        return dotdict({key: args[key] for key in self.trainableArgs})
 
-
-    def _load_model(self, models, iteration, i):
-        modelArgs = models[i].load_checkpoint(
+    def _load_model(self, model, iteration, i):
+        modelArgs = model.load_checkpoint(
             folder=os.path.join(self.args.checkpoint, self.args.run_name),
-            filename=get_iter_file(i, iteration)
+            filename=get_iter_file(iteration, i)
         )
-        self.trainableArgs[i] = self.get_trainable_attributes(modelArgs)
         
         # Check that it agrees not on trainable args if training more than one
         if self.numNets != 1:
-            for key,val in modelArgs.items(): 
-                assert (self.args.get(key) == val or self.trainableArgs.get(key) == val), "One of the models differs from default arguments not on a training arguement - {} is {} in the model but {} in the defaults".format(key, val, self.args.get(key))
+            for key in modelArgs:
+                val = self.args[key]
+                assert ((self.args[key] == val) or (key in self.trainableArgs) or (key in self.argsNotToCheck)), "One of the models differs from default arguments not on a training arguement - {} is {} in the model but {} in the defaults".format(key, val, self.args.get(key))
 
-    
-    def _save_model(self, models, iteration, i):
-        models[i].save_checkpoint(
+    def _save_model(self, model, iteration, i):
+        model.save_checkpoint(
             folder=os.path.join(self.args.checkpoint, self.args.run_name),
-            filename=get_iter_file(i, iteration)
+            filename=get_iter_file(iteration, i)
         )
 
     def learn(self):
@@ -269,11 +328,9 @@ class Coach:
             while self.model_iter <= self.args.numIters:
                 print(f'------ITER {self.model_iter}------')
 
-                if (
-                    (not self.args.skipSelfPlayIters
-                        or self.model_iter > self.args.skipSelfPlayIters)
-                    and not (self.args.train_on_past_data and self.model_iter == self.args.startIter)
-                ):
+                if ((not self.args.skipSelfPlayIters\
+                        or self.model_iter > self.args.skipSelfPlayIters)\
+                    and not (self.args.train_on_past_data and self.model_iter == self.args.startIter)):
                     if self.model_iter <= self.args.numWarmupIters:
                         print('Warmup: random policy and value')
                         self.warmup = True
@@ -285,7 +342,16 @@ class Coach:
                     if self.warmup:
                         print('Warmup: random policy and value')
 
-                    self.generateSelfPlayAgents()
+                    reset = None
+                    
+                    if self.args.withPopulation and\
+                       self.args.roundRobinAsSelfPlay and\
+                       ((self.model_iter - 1) %self.args.roundRobinFreq == 0 or\
+                        self.args.bestNet == None):
+                       reset = self.args.modeOfAssigningWork, self.args. arenaTemp
+                       self.args.modeOfAssigningWork = ModeOfGameGen.CROSS_PRODUCT
+
+                    self.generateSelfPlayAgents(exact = (reset != None))
                     self.processSelfPlayBatches(self.model_iter)
                     if self.stop_train.is_set():
                         break
@@ -293,6 +359,11 @@ class Coach:
                     if self.stop_train.is_set():
                         break
                     dat = self.processGameResults(self.model_iter)
+
+                    if reset != None:
+                        self.args.modeOfAssigningWork = reset
+                        self.roundRobin(self.model_iter-1, dat[0], dat[1])
+
                     if self.stop_train.is_set():
                         break
                     self.killSelfPlayAgents()
@@ -302,29 +373,27 @@ class Coach:
                 self.train(self.model_iter)
                 if self.stop_train.is_set():
                     break
-
+                
                 if self.args.compareWithBaseline and (self.model_iter - 1) % self.args.baselineCompareFreq == 0:
-                    for i in range(0, self.numNets):
-                        self.compareToBaseline(self.model_iter, i)
+                    net = self.args.bestNet
+                    self.compareToBaseline(self.model_iter, net)
                     if self.stop_train.is_set():
                         break
 
                 if self.args.compareWithPast and (self.model_iter - 1) % self.args.pastCompareFreq == 0:
-                    for i in range(0, self.numNets):
-                        self.compareToPast(self.model_iter)
+                    for net in range(0, self.numNets):
+                        self.compareToPast(self.model_iter, net)
                     if self.stop_train.is_set():
                         break
 
                 # if (self.model_iter % 3 == 0 and self.model_iter > 1):
                 #     self.tuneHyperparams(5)
                 if self.args.calculateElo:
-                    for i in range(0, self.numNets):
-                        self.calculateElo()
-                # z = self.args.expertValueWeight
-                # self.args.expertValueWeight.current = min(
-                #     self.model_iter, z.iterations) / z.iterations * (z.end - z.start) + z.start
+                    net = self.args.bestNet
+                    self.calculateElo(net)
 
-                self.writer.add_scalar('win_rate/self_play_model', self.self_play_iter, self.model_iter)
+                for net in range(0, self.numNets):
+                    self.writer.add_scalar(str(net)+'win_rate/self_play_model', self.self_play_iter[net], self.model_iter)
                 self.model_iter += 1
                 print()
 
@@ -336,20 +405,33 @@ class Coach:
         if self.agents:
             self.killSelfPlayAgents()
 
+    # Tries to evenly divide up all the different combinations of self play games 
+    #  between all the workers
     def gamesFor(self, i):
-        numWorkers = self.game_cls.num_players()
-        numPerPair = self.args.gamesPerIteration//(self.numNets**numWorkers)
-        lists = list(itertools.product(list(range(0, self.numNets)), repeat = numWorkers))
+        if self.args.modeOfAssigningWork == ModeOfGameGen.CROSS_PRODUCT:
+            numPlayers = self.game_cls.num_players()
+            numWorkers = self.args.workers
+            numPerPair = round(self.args.gamesPerIteration/(self.numNets**numPlayers))
+            lists = list(itertools.product(list(range(0, self.numNets)), repeat = numPlayers))
+     
+            step = len(lists)//numWorkers
+            rem  = len(lists)%numWorkers
+        
+            retList = lists[floor(step*i) : floor(step*(i+1))] + ([] if (rem == 0) else [lists[-1-floor(rem/numWorkers * i)]])
 
-        step = (len(lists)/numWorkers)
+            return (numPerPair, retList)
 
-        if i < numWorkers:
-            return (numPerPair, lists[floor(step*i) : ceil(step*(i+1))])
+        elif self.args.modeOfAssigningWork == ModeOfGameGen.ONE_PER_WORKER:
+            nets = np.array(range(self.numNets))
+
+            ret = [np.random.choice(nets) for _ in range(self.game_cls.num_players())]
+            return (self.args.gamesPerIteration, [tuple(ret)])
+
         else:
-            return (numPerPair, lists[floor(step*i) : ])
-
+            raise ValueError("modeOfAssigningWork must be set to an element of ModeOfGameGen (or the mode you have picked is not implemented)")
+ 
     @_set_state(TrainState.INIT_AGENTS)
-    def generateSelfPlayAgents(self):
+    def generateSelfPlayAgents(self, exact = False):
         self.stop_agents = mp.Event()
         self.ready_queue = mp.Queue()    
         for i in range(self.args.workers):
@@ -374,11 +456,13 @@ class Coach:
                 self.policy_tensors[i].pin_memory()
                 self.value_tensors[i].pin_memory()
 
+            #print(self.gamesFor(i))
+            self.games_for_agent.append(self.gamesFor(i))
             self.agents.append(
-                SelfPlayAgent(i, self.gamesFor(i), self.game_cls, self.ready_queue, self.batch_ready[i],
+                SelfPlayAgent(i, self.games_for_agent[i], self.game_cls, self.ready_queue, self.batch_ready[i],
                               self.input_tensors[i], self.policy_tensors[i], self.value_tensors[i], self.file_queue,
                               self.result_queue, self.completed, self.games_played, self.stop_agents, self.pause_train,
-                              self.args, _is_warmup=self.warmup)
+                              self.args, _is_warmup=self.warmup, _exact_game_count=exact)
             )
             self.agents[i].daemon = True
             self.agents[i].start()
@@ -396,23 +480,16 @@ class Coach:
 
             try:
                 id, netsNumbers, roundNum = self.ready_queue.get(timeout=1)
-                indexToNet = self.gamesFor(id)[1]
+                indexToNet = self.games_for_agent[id][1]
                 cumulative = 0
                 for i in range(0, len(netsNumbers)):
                     if netsNumbers[i] == 0:
                         continue;
-                    #print("using {} for {} to {}".format(indexToNet[i][roundNum], cumulative, cumulative + netsNumbers[i]))
-                    #print(len(netsToUse))
                     policy, value = nnets[indexToNet[i][roundNum]].process(self.input_tensors[id][cumulative:cumulative+netsNumbers[i]])
-                    for j in range(0, len(policy)):
-                        self.policy_tensors[id][j].copy_(policy[j])
-                        self.value_tensors[id][j].copy_(value[j])
+                    self.policy_tensors[id][cumulative: cumulative + netsNumbers[i]].copy_(policy)
+                    self.value_tensors[id][cumulative: cumulative + netsNumbers[i]].copy_(value)
                     cumulative += netsNumbers[i]
-
-                #policy, value = nnets[0].process(self.input_tensors[id])
-                #self.policy_tensors[id].copy_(policy)
-                #self.value_tensors[id].copy_(value)
-
+                
                 self.batch_ready[id].set()
             except Empty:
                 pass
@@ -463,17 +540,24 @@ class Coach:
     def processGameResults(self, iteration):
         num_games = self.result_queue.qsize()
         wins, draws, avg_game_length = get_game_results(self.numNets, self.result_queue, self.game_cls)
-        if self.numNets == 1: 
-            for i in range(0, self.game_cls.num_players()):
-                wins, draws, avg_game_length = wins[0], draws[0], avg_game_length[0]
-            for i in range(len(wins)):
-                self.writer.add_scalar(f'win_rate/player{i}', (
-                        wins[i] + (0.5 * draws if self.args.use_draws_for_winrate else 0)
-                ) / num_games, iteration)
-            self.writer.add_scalar('win_rate/draws', draws / num_games, iteration)
-            self.writer.add_scalar('win_rate/avg_game_length', avg_game_length, iteration)
         
-        return wins, draws, avg_game_length
+        numWins = np.sum(wins, axis = tuple(range(len(wins.shape) - 1)))
+        numDraws = np.sum(draws)
+        numAvgGameLength = np.sum(avg_game_length)
+
+        numPlayers = self.game_cls.num_players()
+        print(numWins)
+        print(numDraws)
+        print(numAvgGameLength)
+
+        for i in range(numPlayers):
+            self.writer.add_scalar(f'win_rate/player{i}', (
+                    numWins[i] + (numDraws/numPlayers if self.args.use_draws_for_winrate else 0))/ 
+                    num_games, iteration)
+        self.writer.add_scalar('win_rate/draws', numDraws / num_games, iteration)
+        self.writer.add_scalar('win_rate/avg_game_length', numAvgGameLength, iteration)
+        
+        return wins, draws, numAvgGameLength
 
     @_set_state(TrainState.KILL_AGENTS)
     def killSelfPlayAgents(self):
@@ -506,6 +590,7 @@ class Coach:
         self.policy_tensors = []
         self.value_tensors = []
         self.batch_ready = []
+        self.games_for_agent = []
         self.ready_queue = mp.Queue()
         self.file_queue = mp.Queue()
         self.result_queue = mp.Queue()
@@ -551,9 +636,9 @@ class Coach:
             train_steps = len(dataset) // self.args.train_batch_size \
                if train_on_all else (num_train_steps // self.args.train_batch_size
                    if self.args.autoTrainSteps else self.args.train_steps_per_iteration)
-            result = np.zeros(self.numNets)
+            result = np.zeros([2,self.numNets])
             for toTrain in range(0, self.numNets):
-                 result[toTrain] = self.train_nets[toTrain].train(dataloader, train_steps)
+                 result[0][toTrain], result[1][toTrain] = self.train_nets[toTrain].train(dataloader, train_steps)
 
             del dataloader
             del dataset
@@ -595,21 +680,22 @@ class Coach:
             [add_tensor_dataset(i, datasets) for i in range(max(1, iteration - current_history_size), iteration + 1)]
             self.loss_pis, self.loss_vs = train_data(datasets)
 
-        for i in range(0, self.numNets):
-            self.writer.add_scalar('loss/policy'+str(i), self.loss_pis[i], iteration)  # TODO: policy loss not showing up in tensorboard
-            self.writer.add_scalar('loss/value'+str(i), self.loss_vs[i], iteration)
-            self.writer.add_scalar('loss/total'+str(i), self.loss_pis[i] + self.loss_vs[i], iteration)
+        net = self.args.bestNet
+        self.writer.add_scalar('loss/policy', self.loss_pis[net], iteration)  # TODO: policy loss not showing up in tensorboard
+        self.writer.add_scalar('loss/value', self.loss_vs[net], iteration)
+        self.writer.add_scalar('loss/total', self.loss_pis[net] + self.loss_vs[net], iteration)
 
-        self._save_models(self.train_nets, iteration)
+        for net in range(self.numNets):
+            self._save_model(self.train_nets[net], iteration, net)
 
     def calculateElo(self, player):
         if not os.path.exists("elo/"+self.args.run_name):
             os.makedirs("elo/"+self.args.run_name)
         networks = sorted(glob(self.args.checkpoint + '/' + self.args.run_name + '/*'))
         if self.model_iter == 1:
-            np.savetxt("elo/"+self.args.run_name+"/ELOS.csv", [[0]], delimiter=",")
+            np.savetxt('elo/'+self.args.run_name+'/' + 'ELOS.csv', [[0]], delimiter=",")
 
-        elos = np.loadtxt('elo/'+self.args.run_name+'/' + player + 'ELOS.csv', delimiter=',')
+        elos = np.loadtxt('elo/'+self.args.run_name+'/' + 'ELOS.csv', delimiter=',')
         elos = [elos]
         elos = np.array(elos).flatten()
         # print(elos)
@@ -641,11 +727,11 @@ class Coach:
         opponents = np.random.choice(np.arange(0, len(elos)), size=num_games)
         if self.args.eloUniform:
             opponents = np.arange(max(0, len(elos)-num_games), len(elos))
-        print(f"Pitting {player} against the following iters:{opponents}")
+        print(f"Pitting against the following iters:{opponents}")
         for i in opponents:
-            print(f'PITTING {player} AGAINST ITERATION {i} FOR ELO CALCULATION ')
+            print(f'PITTING AGAINST ITERATION {i} FOR ELO CALCULATION ')
             opponent_elo = elos[i]
-            self._load_model(self.elo_play_net, i)
+            self._load_model(self.elo_play_net, i, player)
             pplayer = cls(self.elo_play_net, self.game_cls, sf_args)
             players = [nplayer] + [pplayer] * (self.game_cls.num_players() - 1)
             self.arena = Arena(players, self.game_cls, use_batched_mcts=False, args=sf_args)
@@ -660,52 +746,9 @@ class Coach:
         current_elo = current_elo + 32*(running_score - running_expectation)
         current_elo = max(current_elo, 0)
         elos = np.append(elos, current_elo)
-        np.savetxt("elo/"+self.args.run_name+"/ELOS.csv", [elos], delimiter=",")
-        print(f'Self play ELO for {player} : {current_elo}')
-        self.writer.add_scalar('elo/self_play_elo'+str(player), current_elo, self.model_iter)
-
-    # def calculateEloChkp(self, m):
-    #     if not os.path.exists("elo/"+self.args.run_name):
-    #         os.makedirs("elo/"+self.args.run_name)
-    #     networks = sorted(glob(self.args.checkpoint + '/' + self.args.run_name + '/*'))
-    #     if m == 1:
-    #         np.savetxt("elo/"+self.args.run_name+"/ELOS.csv", [[0]], delimiter=",")
-
-    #     elos = np.loadtxt('elo/'+self.args.run_name+'/ELOS.csv', delimiter=',')
-    #     elos = [elos]
-    #     elos = np.array(elos).flatten()
-    #     print(elos)
-    #     # current_elo = elos[len(elos)-1]
-    #     current_elo = 0
-
-    #     sf_args = self.args.copy()
-    #     sf_args.numMCTSSims = 15
-    #     self._load_model(self.train_net, m)
-    #     cls = MCTSPlayer if self.args.arenaMCTS else NNPlayer
-    #     nplayer = cls(self.train_net, self.game_cls, sf_args)
-    #     running_score = 0
-    #     running_expectation = 0
-    #     for i in np.random.randint(len(elos), size=5):
-    #         print(f'PITTING AGAINST ITERATION {i}')
-    #         opponent_elo = elos[i]
-    #         self._load_model(self.elo_play_net, i)
-    #         pplayer = cls(self.elo_play_net, self.game_cls, sf_args)
-    #         players = [nplayer] + [pplayer] * (self.game_cls.num_players() - 1)
-    #         self.arena = Arena(players, self.game_cls, use_batched_mcts=False, args=sf_args)
-    #         wins, draws, winrates = self.arena.play_games(10, verbose=False)
-
-    #         expected_score = 1/(1+10**( (opponent_elo-current_elo)/400 ))
-    #         actual_score = (wins[0] + 0.5*draws)#/(wins[0]+wins[1]+draws)
-    #         running_expectation += 10*expected_score
-    #         running_score += actual_score
-    #         #current_elo = current_elo + 32*(actual_score - 10*expected_score)
-
-    #     current_elo = current_elo + 32*(running_score - running_expectation)
-    #     current_elo = max(current_elo, 0)
-    #     elos = np.append(elos, current_elo)
-    #     np.savetxt("elo/"+self.args.run_name+"/ELOS.csv", [elos], delimiter=",")
-    #     print(f'Self play ELO: {current_elo}')
-    #     #self.writer.add_scalar('elo/self_play_elo_3', current_elo, m)
+        np.savetxt('elo/'+self.args.run_name+'/' + 'ELOS.csv', [elos], delimiter=",")
+        print(f'Self play ELO : {current_elo}')
+        self.writer.add_scalar('elo/self_play_elo', current_elo, self.model_iter)
 
     def randomPreviousGames(self, ITER):
         elos = np.loadtxt('elo/'+self.args.run_name+'/ELOS.csv', delimiter=',')
@@ -714,7 +757,6 @@ class Coach:
         for i in range(1, len(elos)):
             #print(i, elos[i])
             self.writer.add_scalar('elo/self_play_elo_3', elos[i], i)
-
     
     def sweepCPUCT(self, num):
         params = np.linspace(0.25, 5, num)
@@ -741,7 +783,6 @@ class Coach:
             print(f"Optimimum CPUCT: {params[bestIndex]}")
             self.args.cpuct = params[bestIndex]
         self.writer.add_scalar("hyperparmeters/CPUCT", self.args.cpuct, self.model_iter)
-
 
     #Testing code--- Not working for the moment
     def tuneHyperparams(self, num):
@@ -774,7 +815,7 @@ class Coach:
         #Round robin
         for i in range(len(params)):
             print(params[i].cpuct)
-        self._load_model(self.elo_play_net, self.model_iter)
+        self._load_model(self.elo_play_net, self.model_iter, player)
         cls = MCTSPlayer if self.args.arenaMCTS else NNPlayer
         
         for p in range(len(params)):
@@ -798,14 +839,68 @@ class Coach:
         self.writer.add_scalar("hyperparmeters/CPUCT", params[best].cpuct, self.model_iter)
         # self.writer.add_scalar("hyperparmeters/ROOT_POLICY_TEMP", params[best].root_policy_temp, self.model_iter)
         # self.writer.add_scalar("hyperparmeters/ROOT_NOISE_FRAC", params[best].root_noise_frac, self.model_iter)
+    
+    @_set_state(TrainState.ROUND_ROBIN)
+    def roundRobin(self, iteration, wins, draws):
+        print('PERFORMING ROUND ROBIN ANALYSIS')
+        print()
+        totalWins  = np.zeros(self.numNets)
+        numPlayers = self.game_cls.num_players()
+
+        for win, numWins in np.ndenumerate(wins):
+            if numWins == 0:
+                continue;
+            whoWon  = win[-1]
+            totalWins[win[whoWon]] += numWins
+        
+        if self.args.use_draws_for_winrate:
+            for draw, numDraws in np.ndenumerate(draws):
+                if numDraws == 0:
+                    continue;
+                for p in draw:
+                    totalWins[p] += numDraws/numPlayers
+
+        ranking = np.argsort(totalWins)
+
+        self.args.bestNet = ranking[0]
+
+        numReplace = round(self.args.percentageKilled * self.numNets)
+        
+        for replacerIndex in range(0, numReplace):
+            replacingIndex = self.numNets - replacerIndex - 1
+
+            replacerNet  = ranking[replacerIndex]
+            replacingNet = ranking[replacingIndex]
+
+            print(f'REPLACING {replacingNet} WITH {replacerNet}')
+            argsToUpdate = self.get_trainable_attributes(self.train_nets[replacerNet].args)
+            for key in argsToUpdate:
+                argsToUpdate[key] = argsToUpdate[key] * np.random.uniform(1-self.args.deviation, 1+self.args.deviation)
+
+            
+            self._load_model(self.train_nets[replacingNet], iteration, replacerNet)
+            self.train_nets[replacingNet].args.update(argsToUpdate)
+
+
+            if self.args.model_gating:
+                self.self_play_iter[replacingNet] = self.self_play_iter[replacerNet]
+                self._load_model(self.self_play_nets[replacingNet], self.self_play_iter[replacingNet], replacerNet)
+                self.self_play_nets[replacingNet].args.update(argsToUpdate)
+
+        print('NEW ARGUEMENTS ARE : ')
+        for net in range(self.numNets):
+            print(f"{net} : {self.get_trainable_attributes(self.train_nets[net].args)}")
+
+        print(f'NEW BEST NET IS {self.args.bestNet}')
+        
 
 
 
     @_set_state(TrainState.COMPARE_PAST)
     def compareToPast(self, model_iter, player):
-        self._load_model(self.self_play_nets[player], self.self_play_iter)
+        self._load_model(self.self_play_nets[player], self.self_play_iter[player], player)
 
-        print(f'PITTING AGAINST ITERATION {self.self_play_iter}')
+        print(f'PITTING P{player} AGAINST ITERATION {self.self_play_iter[player]}')
         # if self.args.arenaBatched:
         #     if not self.args.arenaMCTS:
         #         self.args.arenaMCTS = True
@@ -831,7 +926,8 @@ class Coach:
 
         print(f'NEW/PAST WINS FOR {player} : {wins[0]} / {sum(wins[1:])} ; DRAWS : {draws}\n')
         print(f'NEW MODEL WINRATE {player} : {round(winrate, 3)}')
-        self.writer.add_scalar('win_rate/past' + str(i), winrate, model_iter)
+        if player == self.args.bestNet:
+            self.writer.add_scalar('win_rate/past', winrate, model_iter)
 
         ### Model gating ###
         if (
@@ -843,20 +939,23 @@ class Coach:
             self.gating_counter[player] += 1
         elif self.args.model_gating:
             print("No Gating")
-            self.self_play_iter = model_iter
-            self._load_model(self.self_play_net[player], self.self_play_iter)
+            self.self_play_iter[player] = model_iter
+            self._load_model(self.self_play_nets[player], self.self_play_iter[player], player)
             self.gating_counter[player] = 0
 
         if self.args.model_gating:
-            print(f'Using model version {self.self_play_iter} for {player} self play.')
+            print(f'Using model version {self.self_play_iter[player]} for P{player} self play.')
 
     @_set_state(TrainState.COMPARE_BASELINE)
     def compareToBaseline(self, iteration, player):
         test_player = self.args.baselineTester(self.game_cls, self.args)
         can_process = test_player.supports_process() and self.args.arenaBatched
+
+        print()
+
         nnplayer = (MCTSPlayer if self.args.arenaMCTS else NNPlayer)(self.train_nets[player], self.game_cls, self.args)
 
-        print('PITTING AGAINST BASELINE: ' + self.args.baselineTester.__name__)
+        print(f'PITTING AGAINST BASELINE: ' + self.args.baselineTester.__name__)
 
         players = [nnplayer] + [test_player] * (self.game_cls.num_players() - 1)
         self.arena = Arena(players, self.game_cls, use_batched_mcts=self.args.arenaBatched, args=self.args)
@@ -864,6 +963,6 @@ class Coach:
         if self.stop_train.is_set(): return
         winrate = winrates[0]
 
-        print(f'NEW/BASELINE WINS FOR {player}: {wins[0]} / {sum(wins[1:])} ; DRAWS : {draws}\n')
-        print(f'NEW MODEL WINRATE FOR {player}: {round(winrate, 3)}')
+        print(f'NEW/BASELINE WINS FOR : {wins[0]} / {sum(wins[1:])} ; DRAWS : {draws}\n')
+        print(f'NEW MODEL WINRATE FOR : {round(winrate, 3)}')
         self.writer.add_scalar('win_rate/baseline', winrate, iteration)

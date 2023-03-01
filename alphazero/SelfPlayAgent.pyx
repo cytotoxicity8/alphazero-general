@@ -10,27 +10,30 @@ import time
 from alphazero.MCTS import MCTS
 
 
-
+##
 class SelfPlayAgent(mp.Process):
     def __init__(self, id, whoVwhoComputing, game_cls, ready_queue, batch_ready, batch_tensor, policy_tensor,
                  value_tensor, output_queue, result_queue, complete_count, games_played,
-                 stop_event: mp.Event, pause_event: mp.Event(), args, _is_arena=False, _is_warmup=False):
+                 stop_event: mp.Event, pause_event: mp.Event(), args, _is_arena=False, _is_warmup=False, _exact_game_count=False):
         super().__init__()
+
         self.id = id
         self.numPer = whoVwhoComputing[0]
         self.listToCompute = whoVwhoComputing[1]
         self.numStarted = 0
-        self.numRunsDone = 0
+        self.whichPlayerNext = 0
 
         self.game_cls = game_cls
         self.numPlayers = game_cls.num_players()
         self.ready_queue = ready_queue
         self.batch_ready = batch_ready
         self.batch_tensor = batch_tensor
+        
         if _is_arena:
             self.batch_size = policy_tensor.shape[0]
         else:
             self.batch_size = self.batch_tensor.shape[0]
+        
         self.policy_tensor = policy_tensor
         self.value_tensor = value_tensor
         self.output_queue = output_queue
@@ -47,9 +50,10 @@ class SelfPlayAgent(mp.Process):
         self.pause_event = pause_event
         self.args = args
 
-        self._is_arena = _is_arena
-        self._is_warmup = _is_warmup
-
+        self._is_arena         = _is_arena
+        self._is_warmup        = _is_warmup
+        self._exact_game_count = _exact_game_count
+        
         if _is_arena:
             self.player_to_index = list(range(game_cls.num_players()))
             np.random.shuffle(self.player_to_index)
@@ -65,37 +69,51 @@ class SelfPlayAgent(mp.Process):
             self.addNextToCompute()
         #print(len(self.netsGoing[0]))
 
-    def _get_mcts(self):
-        if self._is_arena:
-            return tuple([MCTS(self.args) for _ in range(self.game_cls.num_players())])
+    # Each net must have it's own MCTS
+    #  extra machinery is to ensure that each net has exactly 1 MCTS
+    def _get_mcts(self, _next_game_type = None):
+        ret = [MCTS(self.args) for _ in range(self.numPlayers)]
+        players = []
+        p = 0
+        if _next_game_type != None and len(_next_game_type) == self.numPlayers:
+            for net in range(self.numPlayers):
+                if _next_game_type[net] in _next_game_type[:net]:
+                    players.append(_next_game_type.index(_next_game_type[net]))
+                else:
+                    players.append(p)
+                    p += 1
         else:
-            return MCTS(self.args)
+            players = list(range(self.numPlayers))
+            p = self.numPlayers
+            
+        return (players, ret[:p])
 
     def _mcts(self, index: int) -> MCTS:
-        mcts = self.mcts[index]
+        playersToNet, mcts = self.mcts[index]
         if self._is_arena:
             return mcts[self.games[index].player]
         else:
-            return mcts
+            return mcts[playersToNet[self.whichPlayerNext]]
 
     def _check_pause(self):
         while self.pause_event.is_set():
             time.sleep(.1)
 
-    def addNextToCompute(self, i = None):
-        self.netsGoing[(self.numStarted//self.numPer) % len(self.netsGoing)] +=1
-        if i == None:
-            self.games.append(self.game_cls())
-            self.histories.append([])
-            self.temps.append(self.args.startTemp)
-            self.next_reset.append(0)
-            self.mcts.append(self._get_mcts())
+    def addNextToCompute(self):
+        netToAdd = (self.numStarted//self.numPer)
+        if netToAdd>= len(self.netsGoing) and self._exact_game_count:
+            return
+        netToAdd = netToAdd % len(self.netsGoing)
+
+        self.netsGoing[netToAdd] +=1
+        self.games.append(self.game_cls())
+        self.histories.append([])
+        self.temps.append(self.args.startTemp)
+        self.next_reset.append(0)
+        if not(self._is_arena):
+            self.mcts.append(self._get_mcts(self.listToCompute[netToAdd]))
         else:
-            self.games[i]      = (self.game_cls())
-            self.histories[i]  = []
-            self.temps[i]      = self.args.startTemp
-            self.next_reset[i] = 0
-            self.mcts[i]       = self._get_mcts()
+            self.mcts.append(self._get_mcts())
 
         self.numStarted +=1
 
@@ -121,7 +139,7 @@ class SelfPlayAgent(mp.Process):
     def run(self):
         try:
             np.random.seed()
-            while not self.stop_event.is_set() and self.games_played.value < self.args.gamesPerIteration:
+            while not self.stop_event.is_set() and self.games_played.value < self.args.gamesPerIteration and not(self._exact_game_count and len(self.games) == 0):
                 self._check_pause()
                 self.fast = np.random.random_sample() < self.args.probFastSim
                 sims = self.args.numFastSims if self.fast else self.args.numMCTSSims \
@@ -131,8 +149,10 @@ class SelfPlayAgent(mp.Process):
                     self.generateBatch()
                     if self.stop_event.is_set(): break
                     self.processBatch()
+
                 if self.stop_event.is_set(): break
                 self.playMoves()
+                self.whichPlayerNext = (self.whichPlayerNext + 1)%self.numPlayers
 
             with self.complete_count.get_lock():
                 self.complete_count.value += 1
@@ -146,8 +166,8 @@ class SelfPlayAgent(mp.Process):
         if self._is_arena:
             batch_tensor = [[] for _ in range(self.game_cls.num_players())]
             self.batch_indices = [[] for _ in range(self.game_cls.num_players())]
-
-        for i in range(self.batch_size):
+        
+        for i in range(len(self.games)):
             self._check_pause()
             state = self._mcts(i).find_leaf(self.games[i])
             if self._is_warmup:
@@ -174,15 +194,14 @@ class SelfPlayAgent(mp.Process):
             self.batch_indices = list(itertools.chain.from_iterable(self.batch_indices))
 
         if not self._is_warmup:
-            self.ready_queue.put((self.id, self.netsGoing, self.numRunsDone % self.numPlayers))
+            self.ready_queue.put((self.id, self.netsGoing, self.whichPlayerNext))
 
     def processBatch(self):
         if not self._is_warmup:
             self.batch_ready.wait()
             self.batch_ready.clear()
-            self.numRunsDone +=1
 
-        for i in range(self.batch_size):
+        for i in range(len(self.games)):
             self._check_pause()
             index = self.batch_indices[i] if self._is_arena else i
             self._mcts(i).process_results(
@@ -195,16 +214,15 @@ class SelfPlayAgent(mp.Process):
 
     def playMoves(self):
         toRem = []
-        offset = 0 
-        for j in range(self.batch_size):
-            i = j - offset
-            #print(i)
-            #print(self.games[i]._board.pieces)
+
+        for i in range(len(self.games)):
             self._check_pause()
             self.temps[i] = self.args.temp_scaling_fn(
                 self.temps[i], self.games[i].turns, self.game_cls.max_turns()
             ) if not self._is_arena else self.args.arenaTemp
             #print(self.temps[i])
+            #print()
+            #print(self._mcts(i), self.games[i], self.temps[i])
             policy = self._mcts(i).probs(self.games[i], self.temps[i])
             action = np.random.choice(self.games[i].action_size(), p=policy)
             if not self.fast and not self._is_arena:
@@ -213,10 +231,8 @@ class SelfPlayAgent(mp.Process):
                     self._mcts(i).probs(self.games[i])
                 ))
 
-            if self._is_arena:
-                [mcts.update_root(self.games[i], action) for mcts in self.mcts[i]]
-            else:
-                self._mcts(i).update_root(self.games[i], action)
+            _ = [mcts.update_root(self.games[i], action) for mcts in self.mcts[i][1]]
+
             self.games[i].play_action(action)
             if self.args.mctsResetThreshold and self.games[i].turns >= self.next_reset[i]:
                 self.mcts[i] = self._get_mcts()
@@ -246,30 +262,15 @@ class SelfPlayAgent(mp.Process):
                                     state.observation(), pi, np.array(true_winstate, dtype=np.float32)
                                 ))
                     toRem.append(i)
-                    """self.games[i] = self.game_cls()
-                    nextJobs = self.work_to_do_queue.get()
-                    # To make sure next step is taken by nextJobs[0]
-                    base = self.numRunsDone%self.numPlayers
-                    for player in range(0,self.numPlayers):
-                        self.netsGoing[(player+self.numRunsDone)%self.numPlayers][i] = nextJobs[player]
-
-                    self.histories[i] = []
-                    self.temps[i] = self.args.startTemp
-                    self.mcts[i] = self._get_mcts()"""
                 else:
                     lock.release()
 
         toRem.reverse()
-        #print("before")
-        #for i in self.games:
-        #    print(i._board.pieces)
-        #print(toRem)
         for i in toRem:
             self.removeFromComputing(i)
 
-        #print("after")
-        #for i in self.games:
-        #    print(i._board.pieces)
-
-        for i in toRem:
-            self.addNextToCompute()
+        # To ensure that all games are played in the correct order (i.e with the first player 
+        #  in the tuple acting first)
+        if self.whichPlayerNext == 0 or self._is_arena:
+            for _ in range(self.batch_size - len(self.games)):
+                self.addNextToCompute()

@@ -11,10 +11,14 @@ class dotdict(dict):
     def copy(self):
         data = super().copy()
         return self.__class__(data)
+    
 
 
-def get_iter_file(number: int, iteration: int):
-    return f'{number:02d}-iteration-{iteration:04d}.pkl'
+def get_iter_file(iteration:int , number = None):
+    if number != None:
+        return f'{number:02d}-iteration-{iteration:04d}.pkl'
+    else:
+        return f'iteration-{iteration:04d}.pkl'
 
 
 def scale_temp(scale_factor: float, min_temp: float, cur_temp: float, turns: int, const_max_turns: int) -> float:
@@ -22,6 +26,9 @@ def scale_temp(scale_factor: float, min_temp: float, cur_temp: float, turns: int
         return max(min_temp, cur_temp / 2)
     else:
         return cur_temp
+
+def default_const_args(x):
+    return dotdict({'cpuct': 1.25})
 
 
 def default_temp_scaling(*args, **kwargs) -> float:
@@ -33,7 +40,6 @@ def const_temp_scaling(temp, *args, **kwargs) -> float:
 
 
 def get_game_results(numberOfCompetingNets, result_queue, game_cls, _get_index=None):
-    player_to_index = {p: i for i, p in enumerate(range(game_cls.num_players()))}
 
     num_games = result_queue.qsize()
     wins = np.zeros([numberOfCompetingNets] * game_cls.num_players() + [game_cls.num_players()])
@@ -42,17 +48,16 @@ def get_game_results(numberOfCompetingNets, result_queue, game_cls, _get_index=N
 
     for _ in range(num_games):
         state, winstate, agent_id, players = result_queue.get()
-        temp = list(players)
-        temp.sort()
-        players = tuple(temp)
+        players = tuple(players)
         game_len_sum[players] += state.turns
 
         for player, is_win in enumerate(winstate):
+            #print(player, is_win)
             if is_win:
-                if player == len(wins):
+                if player == game_cls.num_players():
                     draws[players] += 1
                 else:
-                    index = _get_index(player, agent_id) if _get_index else player_to_index[player]
+                    index = _get_index(player, agent_id) if _get_index else player
                     wins[players][index] += 1
 
     return wins, draws, game_len_sum / num_games if num_games else game_len_sum
