@@ -285,7 +285,7 @@ class Arena:
                     n = size
                     end = time.time()
 
-                wins, draws, _ = get_game_results(1,
+                wins, draws, _, _, _ = get_game_results(1,
                     result_queue,
                     self.game_cls,
                     _get_index=lambda p, i: self._agents[i].player_to_index[p]

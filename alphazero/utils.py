@@ -44,23 +44,39 @@ def get_game_results(numberOfCompetingNets, result_queue, game_cls, _get_index=N
     num_games = result_queue.qsize()
     wins = np.zeros([numberOfCompetingNets] * game_cls.num_players() + [game_cls.num_players()])
     draws = np.zeros([numberOfCompetingNets] * game_cls.num_players())
-    game_len_sum = np.zeros([numberOfCompetingNets] * game_cls.num_players())
+    game_len_sum = 0
+
+    selfWins  = np.zeros([numberOfCompetingNets, game_cls.num_players(), game_cls.num_players()])
+    selfDraws = np.zeros([numberOfCompetingNets, game_cls.num_players()])
 
     for _ in range(num_games):
         state, winstate, agent_id, players = result_queue.get()
         players = tuple(players)
-        game_len_sum[players] += state.turns
+        game_len_sum += state.turns
 
-        for player, is_win in enumerate(winstate):
-            #print(player, is_win)
-            if is_win:
-                if player == game_cls.num_players():
-                    draws[players] += 1
-                else:
-                    index = _get_index(player, agent_id) if _get_index else player
-                    wins[players][index] += 1
+        for p in players:
+            if p >= numberOfCompetingNets:
+                netPos = players.index(p - numberOfCompetingNets)
 
-    return wins, draws, game_len_sum / num_games if num_games else game_len_sum
+                for player, is_win in enumerate(winstate):
+                #print(player, is_win)
+                    if is_win:
+                        if player == game_cls.num_players():
+                            selfDraws[players[netPos]][netPos] += 1
+                        else:
+                            selfWins[players[netPos]][netPos][player] += 1
+                break;
+        else:
+            for player, is_win in enumerate(winstate):
+                #print(player, is_win)
+                if is_win:
+                    if player == game_cls.num_players():
+                        draws[players] += 1
+                    else:
+                        index = _get_index(player, agent_id) if _get_index else player
+                        wins[players][index] += 1
+
+    return wins, draws, game_len_sum / num_games if num_games else game_len_sum, selfWins, selfDraws
 
 
 def plot_mcts_tree(mcts, max_depth=2):
