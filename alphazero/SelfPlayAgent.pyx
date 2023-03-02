@@ -101,9 +101,11 @@ class SelfPlayAgent(mp.Process):
 
     def addNextToCompute(self):
         netToAdd = (self.numStarted//self.numPer)
-        if netToAdd>= len(self.netsGoing) and self._exact_game_count:
-            return
-        netToAdd = netToAdd % len(self.netsGoing)
+        if netToAdd>= len(self.listToCompute):
+            if self._exact_game_count:
+                return
+            self.netsGoing += [0 for _ in range(self.listToCompute)]
+            self.listToCompute *= 2
 
         self.netsGoing[netToAdd] +=1
         self.games.append(self.game_cls())
@@ -117,13 +119,28 @@ class SelfPlayAgent(mp.Process):
 
         self.numStarted +=1
 
-    def getNetIndex(self, index):
+    def getNetIndex(self, num):
         cumulative = 0
         for i in range(0,len(self.netsGoing)):
             cumulative += self.netsGoing[i]
-            if cumulative > index:
+            if cumulative > num:
                 return i
         return len(self.netsGoing)
+
+    # Returns an list containing (net, number) pairs indicating the order and number
+    #   of games in a row which can be batched - should not be the case that 
+    #   (net, a) follows (net, b) for any net, a or b
+    def getNetNums(self):
+        ret = []
+        for game in self.listToCompute:
+            #print(game)
+            if len(ret) > 0 and game[self.whichPlayerNext] == ret[-1][0]:
+                ret[-1] = (ret[-1][0], ret[-1][1] + self.numPer)
+            else:
+                ret.append((game[self.whichPlayerNext], self.numPer))
+        return ret
+
+
 
     def removeFromComputing(self, index):
         i = self.getNetIndex(index)
@@ -194,7 +211,8 @@ class SelfPlayAgent(mp.Process):
             self.batch_indices = list(itertools.chain.from_iterable(self.batch_indices))
 
         if not self._is_warmup:
-            self.ready_queue.put((self.id, self.netsGoing, self.whichPlayerNext))
+            # ID, the list of what nets and how many are found in the data sent so to best batch
+            self.ready_queue.put((self.id, self.getNetNums()))
 
     def processBatch(self):
         if not self._is_warmup:

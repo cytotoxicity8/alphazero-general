@@ -90,7 +90,6 @@ DEFAULT_ARGS = dotdict({
     # If true then the round robin will take place by replacing a self play session
     #  every roundRobinFreq number of steps
     'roundRobinAsSelfPlay' : True,
-    # Ignored if roundRobinAsSelfPlay
     # Number of games played between each net in the round robin
     #  note populationSize^2 * (num below) games will be played in total
     'roundRobinGames' : 6,
@@ -361,7 +360,7 @@ class Coach:
                                 self.args.gamesPerIteration)
                        self.args.modeOfAssigningWork = ModeOfGameGen.CROSS_PRODUCT
                        self.args.startTemp = self.args.arenaTemp
-                       #self.args.gamesPerIteration = self.args.roundRobinGames * (self.numNets**self.game_cls.num_players())
+                       self.args.gamesPerIteration = self.args.roundRobinGames * (self.numNets**self.game_cls.num_players())
 
                     selfPlay = None
                     if reset != None and self.args.compareWithPast and (self.model_iter - 1) % self.args.pastCompareFreq == 0:
@@ -369,7 +368,7 @@ class Coach:
 
                     for i in range(self.args.workers):
                         self.games_for_agent.append(self.gamesFor(i, selfPlay))
-                    
+                    #print(selfPlay)
                     if selfPlay != None:
                         self.args.gamesPerIteration = sum([num*len(listOfGames) for num,listOfGames in self.games_for_agent])
     
@@ -495,7 +494,7 @@ class Coach:
                 self.value_tensors[i].pin_memory()
 
             #print(self.gamesFor(i))
-            #print(self.games_for_agent[i])
+            print(self.games_for_agent[i])
             self.agents.append(
                 SelfPlayAgent(i, self.games_for_agent[i], self.game_cls, self.ready_queue, self.batch_ready[i],
                               self.input_tensors[i], self.policy_tensors[i], self.value_tensors[i], self.file_queue,
@@ -520,16 +519,17 @@ class Coach:
                 self.stop_agents.set()
 
             try:
-                id, netsNumbers, roundNum = self.ready_queue.get(timeout=1)
-                indexToNet = self.games_for_agent[id][1]
+                id, netsNumsList = self.ready_queue.get(timeout=1)
+                #indexToNet = self.games_for_agent[id][1]
+                #print(netsNumsList)
                 cumulative = 0
-                for i in range(0, len(netsNumbers)):
-                    if netsNumbers[i] == 0:
+                for net, number in netsNumsList:
+                    if number == 0:
                         continue;
-                    policy, value = nnets[indexToNet[i][roundNum]].process(self.input_tensors[id][cumulative:cumulative+netsNumbers[i]])
-                    self.policy_tensors[id][cumulative: cumulative + netsNumbers[i]].copy_(policy)
-                    self.value_tensors[id][cumulative: cumulative + netsNumbers[i]].copy_(value)
-                    cumulative += netsNumbers[i]
+                    policy, value = nnets[net].process(self.input_tensors[id][cumulative:cumulative+number])
+                    self.policy_tensors[id][cumulative: cumulative + number].copy_(policy)
+                    self.value_tensors[id][cumulative: cumulative + number].copy_(value)
+                    cumulative += number
                 
                 self.batch_ready[id].set()
             except Empty:

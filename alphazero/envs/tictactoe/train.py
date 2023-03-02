@@ -8,7 +8,7 @@ def argsss(x):
     return dotdict({'cpuct': 0.5*(x//2), 'fpu_reduction': 0.5*(x%2)})
 
 args = get_args(
-    run_name='tictacthree',
+    run_name='tictacfour',
     withPopulation=True,
     populationSize= 16,
     roundRobinFreq=5,

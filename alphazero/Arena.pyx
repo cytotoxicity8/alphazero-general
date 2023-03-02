@@ -261,7 +261,7 @@ class Arena:
             n = 0
             while completed.value != self.args.workers:
                 try:
-                    id,_,_ = ready_queue.get(timeout=1)
+                    id,_ = ready_queue.get(timeout=1)
 
                     policy = []
                     value = []
