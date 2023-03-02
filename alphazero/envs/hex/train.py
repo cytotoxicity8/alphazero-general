@@ -12,8 +12,13 @@ import cProfile
 
 BASE_SIZE = OBSERVATION_BOARD_SIZE * OBSERVATION_BOARD_SIZE * NUM_CHANNELS
 
+def hexxyAgs(i):
+    return dotdict({'fpu_reduction':-0.101 + 0.05*i,
+                    'root_noise_frac': 0.01 + 0.05 * i%4,
+                    'cpuct': 3+0.5*(i%5)})
+
 args = get_args(dotdict({
-    'run_name': 'hex_{0}x{0}_observing_{1}x{1}x{2}_Canonical_NoSwap'.format(BOARD_SIZE, OBSERVATION_BOARD_SIZE, NUM_CHANNELS),
+    'run_name': 'hex_{0}x{0}_observing_{1}x{1}x{2}_CanonicalPopulated'.format(BOARD_SIZE, OBSERVATION_BOARD_SIZE, NUM_CHANNELS),
     'workers': mp.cpu_count(),
     'startIter': 0,
     'numIters': 100,
@@ -24,6 +29,13 @@ args = get_args(dotdict({
     # should preferably be a multiple of process_batch_size and workers
     'gamesPerIteration': 512 * mp.cpu_count(),
     '_num_players' : 2,
+
+    'withPopulation' : True,
+    'populationSize' : 16,
+    'getInitialArgs' : hexxyAgs,
+    'roundRobinFreq' : 4,
+    'percentageKilled' : 0.3,
+
     'symmetricSamples': True,
     'train_on_past_data' : False,
     'past_data_run_name' : "human4Layers",
@@ -31,20 +43,17 @@ args = get_args(dotdict({
     'skipSelfPlayIters': None,
     'selfPlayModelIter': None,
     'mctsCanonicalStates': CANONICAL_STATE, 
-    'deterministic': False,
-    'simplifiedResultQueue':False,
     'numMCTSSims': 200, 
     'numFastSims': 20,
     'probFastSim': 0.75,
     'compareWithBaseline': True,
-    'arenaCompareBaseline': 256,
     'arenaCompare': 128,
-    'arena_batch_size': 32,
+    'arena_batch_size': 64,
     'arenaTemp': 1,
     'arenaMCTS': True,
-    'baselineCompareFreq': 0.5,
+    'baselineCompareFreq': 4,
     'compareWithPast': True,
-    'pastCompareFreq': 0.5,
+    'pastCompareFreq': 4,
     'cpuct': 5,
     'fpu_reduction': 0,
     'load_model': True,

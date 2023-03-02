@@ -8,7 +8,7 @@ def argsss(x):
     return dotdict({'cpuct': 0.5*(x//2), 'fpu_reduction': 0.5*(x%2)})
 
 args = get_args(
-    run_name='tictactwo',
+    run_name='tictacthree',
     withPopulation=True,
     populationSize= 16,
     roundRobinFreq=5,
@@ -21,10 +21,9 @@ args = get_args(
     probFastSim=0.5,
     numWarmupIters=0,
     baselineCompareFreq=1,
-    pastCompareFreq=1,
+    pastCompareFreq=5,
     arenaBatchSize=128,
-    arenaCompare=512,
-    arenaCompareBaseline=128,
+    arenaCompare=128,
     process_batch_size=128,
     train_batch_size=512,
     gamesPerIteration=10*512,
@@ -36,7 +35,7 @@ args = get_args(
     value_dense_layers=[128, 64],
     policy_dense_layers=[128],
     compareWithBaseline=True,
-    compareWithPast=False,
+    compareWithPast=True,
 
     eloMCTS=25,
     eloGames=10,

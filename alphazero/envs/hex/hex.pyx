@@ -16,14 +16,14 @@ from alphazero.envs.hex.hexBoard import Board, BLUE_PLAYER, RED_PLAYER, EMPTY
 import numpy as np
 
 
-
+#
 NUM_PLAYERS             = 2
 #MULTI_PLANE_OBSERVATION = False
 BOARD_SIZE              = 7
 OBSERVATION_BOARD_SIZE  = BOARD_SIZE
 MAX_TURNS               = BOARD_SIZE*BOARD_SIZE + 1
 CHANNEL_DICT            = {"OnlyBoard" : 1, "BoardAndTurn" :2, "BasicOneHot" : 3, "OneHotTurn" : 4}
-NUM_CHANNELS            = CHANNEL_DICT.get("OnlyBoard")
+NUM_CHANNELS            = CHANNEL_DICT.get("BasicOneHot")
             
 # This determines weather we do the flip on the board when it's red's turn to make them
 #   appear the same
