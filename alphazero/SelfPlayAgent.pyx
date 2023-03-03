@@ -226,8 +226,10 @@ class SelfPlayAgent(mp.Process):
                 self.games[i],
                 self.value_tensor[index].data.numpy(),
                 self.policy_tensor[index].data.numpy(),
-                False if self._is_arena else self.args.add_root_noise,
-                False if self._is_arena else self.args.add_root_temp
+                # No adding root noise or temp when no doing a fast itteration 
+                #  as we want the best move from out network
+                False if self._is_arena or self.fast else self.args.add_root_noise,
+                False if self._is_arena or self.fast else self.args.add_root_temp
             )
 
     def playMoves(self):
