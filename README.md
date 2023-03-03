@@ -141,3 +141,10 @@ The tensorboard logs have been corrupted for the best trained instance, therefor
 However, the model does have a strange tendency to disregard obvious opportunities on occasion such as a victory in one move or blocking a defeat. Also, the game length seems to even out around 25 moves - despite the players' nearly even win rate - instead of increasing to the maximum as expected. This is being investigated, but it is either due to inappropriate hyperparameters, or a bug in the MCTS code regarding recent changes.
 
 Iteration 48 of the model can be downloaded [here](https://drive.google.com/file/d/1rv9fiFQRUVBv-4PBkfmawtRm3wqAM67H/view?usp=sharing).
+
+## Further Reading :
+
+Below some papers which describe ways of speeding up alpha zero are listed with whether they have been implemented (yet) or not
+ - Yes | https://arxiv.org/pdf/2003.06212.pdf
+ - No  | https://arxiv.org/pdf/1902.10565.pdf
+ - 
