@@ -32,142 +32,179 @@ class ModeOfGameGen(Enum):
     ONE_PER_WORKER = 1
 
 DEFAULT_ARGS = dotdict({
-    'run_name': 'boardgame',
-    'cuda': torch.cuda.is_available(),
-    'workers': mp.cpu_count(),
-    'startIter': 0,
-    'numIters': 1000,
-    'process_batch_size': 256,
-    'train_batch_size': 1024,
-    'arena_batch_size': 64,
-    'train_steps_per_iteration': 64,
-    'train_sample_ratio': 1,
-    'averageTrainSteps': False,
-    'autoTrainSteps': True,   # Calculates the average number of samples in the training window
-                              # if averageTrainSteps set to True, otherwise uses the latest
-                              # number of samples, and does train_sample_ratio * avg_num_steps 
-                              # or last_num_train_steps // train_batch_size
-                              # training steps.
-    'train_on_past_data': False,
-    'past_data_chunk_size': 25,
-    'past_data_run_name': 'boardgame',
-    # should preferably be a multiple of process_batch_size and workers
-    'gamesPerIteration': 256 * mp.cpu_count(),
-    'minTrainHistoryWindow': 4,
-    'maxTrainHistoryWindow': 20,
-    'trainHistoryIncrementIters': 2,
-    '_num_players': None,  # Doesn't have to be changed, set automatically by the env.
-    'min_discount': 1,
-    'fpu_reduction': 0.2,
-    'num_stacked_observations': 1,  # TODO: built-in stacked observations (arg does nothing right now)
-    'numWarmupIters': 1,  # Iterations where games are played randomly, 0 for none
-    'skipSelfPlayIters': None,
-    'selfPlayModelIter': None,
-    # This will let the MCTS search know that you are using canonical states (i.e all
-    #   states are from the perspective of one player). It will then interpret the value
-    #   vector returned from the neural network differently. It will go from :
-    #     (ℙ(Player 1 wins), ℙ(Player 2 wins),ℙ(Draw)) to
-    #     (ℙ(Player about to play wins), ℙ(Other player wins),ℙ(Draw))
-    # Note this shouldn't affect the output of win_state, however should change the output
-    #  of symmetry (i.e. when you call game.win_state() you should still get [0,1,0] if Player
-    #  2 wins but when you call symmetry you should get [1,0,0] if player 2 wins and it's player
-    #  2's turn
-    'mctsCanonicalStates': False,
-    'policy_softmax_temperature': 1.4,
-    'value_softmax_temperature': 1.4,
+    # NECESSARY TO DEFINE ARGS
+        'run_name': 'boardgame',
 
-    # Weather to use population to train hyperparameters
-    'withPopulation' : False,
-    # See the above enum - defines what games each worker will compute in self play
-    'modeOfAssigningWork' : ModeOfGameGen.ONE_PER_WORKER,
-    # The number of individuals in the population
-    'populationSize' : 1,
-    # A function that given an id of a memeber of the population (from 0 to populationSize - 1)
-    #  that returns the trainable arguments to start that instance on
-    'getInitialArgs' : default_const_args,
-    # How often a roundRobin is done to optimize hyperparameters
-    'roundRobinFreq' : 5,
-    # If true then the round robin will take place by replacing a self play session
-    #  every roundRobinFreq number of steps
-    'roundRobinAsSelfPlay' : True,
-    # Number of games played between each net in the round robin
-    #  note populationSize^2 * (num below) games will be played in total
-    'roundRobinGames' : 6,
-    # The %age of the nets that will be killed
-    #  They will be from the bottom of the round robin
-    'percentageKilled' : 0.2,
-    # Which net to use for compare to baseline and elo
-    #  If none will start with a round robin to calc best
-    'bestNet' : None,
-    # Defines the max deviation from original values that can happen when a new models is created
-    'deviation' : 0.2,
+    # Performance related args (as in will need to be set on a per computer basis)
+        'cuda': torch.cuda.is_available(),
+        'workers': mp.cpu_count(),
+        # The size of the batches used for batching MCTS during self play. 
+        #  Equivalent to the number of games that should be played at the same time in each worker.
+        'process_batch_size': 256,
+        'train_batch_size': 1024,
+        # Same as process_batch_size but for arena
+        'arena_batch_size': 64,
+        'train_steps_per_iteration': 64,
+        # should preferably be a multiple of process_batch_size and workers
+        'gamesPerIteration': 256 * mp.cpu_count(),
+        # Iterations where games are played randomly, 0 for none
+        'numWarmupIters': 1, 
 
+    # Kinda housekeeping args
+        #Automatically set
+        'startIter': 0,
+        'numIters': 1000,
+        '_num_players': None,  # Doesn't have to be changed, set automatically by the env.
+        # The number of self play data generation iterations to skip. 
+        #   This assumes that training data already exists for those iterations can be 
+        #   used for training. For example, useful when training is interrupted because 
+        #   data doesn't have to be generated from scratch because it's saved on disk.
+        'skipSelfPlayIters': None,
+        'selfPlayModelIter': None,
+        'load_model': True,
+        'checkpoint': 'checkpoint',
+        'data': 'data',
 
-    'symmetricSamples': True,
-    'numMCTSSims': 100,
-    'numFastSims': 20,
-    'numWarmupSims': 5,
-    'probFastSim': 0.75,
-    'mctsResetThreshold': None,
-    'startTemp': 1,
-    'temp_scaling_fn': default_temp_scaling,
-    'root_policy_temp': 1.1,
-    'root_noise_frac': 0.1,
-    'add_root_noise': True,
-    'add_root_temp': True,
+    # Training Related Args
+        'train_sample_ratio': 1,
+        'averageTrainSteps': False,
+        # Calculates the average number of samples in the training window
+        #   if averageTrainSteps set to True, otherwise uses the latest
+        #   number of samples, and does train_sample_ratio * avg_num_steps 
+        #   or last_num_train_steps // train_batch_size
+        #   training steps.
+        'autoTrainSteps': True,   
+        'train_on_past_data': False,
+            'past_data_chunk_size': 25,
+            'past_data_run_name': 'boardgame',
+        # The number of past iterations to load self play training data from. 
+        #   Starts at min and increments once every trainHistoryIncrementIters 
+        #   iterations until it reaches max
+        'minTrainHistoryWindow': 4,
+        'maxTrainHistoryWindow': 20,
+        'trainHistoryIncrementIters': 2,
+        # Weather to use population based training to train hyperparameters
+        'withPopulation' : False,
+            # See the above enum - defines what games each worker will compute in self play
+            'modeOfAssigningWork' : ModeOfGameGen.ONE_PER_WORKER,
+            # The number of individuals in the population
+            'populationSize' : 1,
+            # A function that given an id of a memeber of the population (from 0 to populationSize - 1)
+            #  that returns the trainable arguments to start that instance on
+            'getInitialArgs' : default_const_args,
+            # How often a roundRobin is done to optimize hyperparameters
+            'roundRobinFreq' : 5,
+            # If true then the round robin will take place by replacing a self play session
+            #  every roundRobinFreq number of steps
+            'roundRobinAsSelfPlay' : True,
+            # Number of games played between each net in the round robin
+            #  note populationSize^2 * (num below) games will be played in total
+            'roundRobinGames' : 6,
+            # The %age of the nets that will be killed
+            #  They will be from the bottom of the round robin
+            'percentageKilled' : 0.2,
+            # Which net to use for compare to baseline and elo
+            #  If none will start with a round robin to calc best
+            'bestNet' : None,
+            # Defines the max deviation from original values that can happen when a new models is created
+            'deviation' : 0.2,
+        # Whether to use symetries when generating games to train off of
+        # if mctsCanonicalStates then must be True
+        'symmetricSamples': True,
+
+        'scheduler': torch.optim.lr_scheduler.MultiStepLR,
+        'scheduler_args': dotdict({
+            'milestones': [75, 125],
+            'gamma': 0.1
+
+            # 'min_lr': 1e-4,
+            # 'patience': 3,
+            # 'cooldown': 1,
+            # 'verbose': False
+        }),
+
+        'lr': 1e-2,
+        'optimizer': torch.optim.SGD,
+        'optimizer_args': dotdict({
+            'momentum': 0.9,
+            'weight_decay': 1e-4
+        }),
+        'value_loss_weight': 1.5,
+
+    # Monte Carlo Tree Seach Args
+        'min_discount': 1,
+        'fpu_reduction': 0.2,
+        # This will let the MCTS search know that you are using canonical states (i.e all
+        #   states are from the perspective of one player). It will then interpret the value
+        #   vector returned from the neural network differently. It will go from :
+        #     (ℙ(Player 1 wins), ℙ(Player 2 wins),ℙ(Draw)) to
+        #     (ℙ(Player about to play wins), ℙ(Other player wins),ℙ(Draw))
+        # Note this shouldn't affect the output of win_state, however should change the output
+        #  of symmetry (i.e. when you call game.win_state() you should still get [0,1,0] if Player
+        #  2 wins but when you call symmetry you should get [1,0,0] if player 2 wins and it's player
+        #  2's turn
+        'mctsCanonicalStates': False,
+        # Num MCTS sims to use normally
+        'numMCTSSims': 100,
+        # or how many to use when doing fast sim
+        'numFastSims': 20,
+        # or how many to use when doing a warmup sim
+        'numWarmupSims': 5,
+        'probFastSim': 0.75,
+        # None if none is wanted otherwise the # of simulations before the mcts is reset
+        'mctsResetThreshold': None,
+        # The initial temperate 
+        'startTemp': 1,
+        'temp_scaling_fn': default_temp_scaling,
+        'root_policy_temp': 1.1,
+        'root_noise_frac': 0.1,
+        'add_root_noise': True,
+        'add_root_temp': True,
+        'cpuct': 1.25,
+
+    # Neural Network Args
+        'policy_softmax_temperature': 1.4,
+        'value_softmax_temperature': 1.4,
+        'nnet_type': 'resnet',  # 'resnet' or 'fc'
+        'value_dense_layers': [1024, 512],
+        'policy_dense_layers': [1024, 512],
+        # OnlyResnet
+            'num_channels': 32,
+            'depth': 4,
+            'value_head_channels': 16,
+            'policy_head_channels': 16,
+
+        # only FC
+            'input_fc_layers': [1024] * 4,  # only for fc networks
+    
+    # Comparing to Baseline Args
     'compareWithBaseline': True,
-    'baselineTester': RawMCTSPlayer,
-    #'arenaCompareBaseline': 128,
-    'arenaCompare': 128,
-    'eloMCTS': 15,
-    'eloGames':10,
-    'eloMatches':10,
-    'eloUniform': False,
-    'calculateElo': True,
-    'arenaTemp': 0.25,
-    'arenaMCTS': True,
-    'arenaBatched': True,
-    'baselineCompareFreq': 1,
+        'baselineCompareFreq': 1,
+        'baselineTester': RawMCTSPlayer,
+        #'arenaCompareBaseline': 128,
+        'arenaCompare': 128,
+        'arenaTemp': 0.25,
+        'arenaMCTS': True,
+        'arenaBatched': True,
+
+    # Comparing with Past Args
     'compareWithPast': True,
-    'pastCompareFreq': 1,
-    'model_gating': True,
-    'max_gating_iters': None,
-    'min_next_model_winrate': 0.52,
-    'use_draws_for_winrate': True,
-    'load_model': True,
-    'cpuct': 1.25,
-    'value_loss_weight': 1.5,
-    'checkpoint': 'checkpoint',
-    'data': 'data',
+        'pastCompareFreq': 1,
+        'model_gating': True,
+        'max_gating_iters': None,
+        'min_next_model_winrate': 0.52,
+        'use_draws_for_winrate': True,
 
-    'scheduler': torch.optim.lr_scheduler.MultiStepLR,
-    'scheduler_args': dotdict({
-        'milestones': [75, 125],
-        'gamma': 0.1
+    # Elo Calculation Args
+    'calculateElo': True,
+        'calculateEloFreq':1,
+        'eloMCTS': 15,
+        'eloGames':10,
+        'eloMatches':10,
+        'eloUniform': False,
 
-        # 'min_lr': 1e-4,
-        # 'patience': 3,
-        # 'cooldown': 1,
-        # 'verbose': False
-    }),
-
-    'lr': 1e-2,
-    'optimizer': torch.optim.SGD,
-    'optimizer_args': dotdict({
-        'momentum': 0.9,
-        'weight_decay': 1e-4
-    }),
-
-    'nnet_type': 'resnet',  # 'resnet' or 'fc'
-    'num_channels': 32,
-    'depth': 4,
-    'value_head_channels': 16,
-    'policy_head_channels': 16,
-
-    # fc only uses the following
-    'input_fc_layers': [1024] * 4,  # only for fc networks
-    'value_dense_layers': [1024, 512],
-    'policy_dense_layers': [1024, 512]
+    # Not working args
+        'num_stacked_observations': 1  # TODO: built-in stacked observations (arg does nothing right now)
 })
 
 
@@ -180,8 +217,6 @@ def get_args(args=None, **kwargs):
 
     if new_args.mctsCanonicalStates:
         assert new_args.symmetricSamples, "Counting who has won with cannonical state representation of board requires symetries to get win_state into correct form"
-
-    assert new_args.model_gating, "Currently there is a silent bug without Model Gating so don't use unless searching for that bug"
 
     return new_args
 
@@ -411,9 +446,7 @@ class Coach:
                     if self.stop_train.is_set():
                         break
 
-                # if (self.model_iter % 3 == 0 and self.model_iter > 1):
-                #     self.tuneHyperparams(5)
-                if self.args.calculateElo:
+                if self.args.calculateElo and (self.model_iter - 1) % self.args.calculateEloFreq == 0:
                     net = self.args.bestNet
                     self.calculateElo(net)
 
