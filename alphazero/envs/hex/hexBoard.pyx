@@ -61,7 +61,7 @@ SWAP  = -9
 SWAP_MOVE = False
 CHECK_FOR_EDGE_TEMPLATES_INTERNAL = False
             # Brdige, Wheel, Ziggurat, III1b, IV1a, 
-vcsToCheck = [False,   False,  False,    False, False]
+vcsToCheck = [True,  False, False,    False, False]
 
 SHOW_VCs = any(vcsToCheck)
 
@@ -79,11 +79,11 @@ cdef class Board():
     cdef public int[:] board
     cdef public int[:] connectionBoard
     cdef public int[:] rank
-    # These are booleans but due to weirdness can't use bint for them
     cdef public tuple lastMove
 
-    cdef list blueVCs
-    cdef list redVCs
+    cdef public list blueVCs
+    cdef public list redVCs
+    #cdef tuple lastVCsAdded
 
     def initconsts(self, int boardSize):
         self.EMPTY        = EMPTY
@@ -323,13 +323,13 @@ cdef class Board():
     #     (_, boardSize) -> RedBottom
     #     (-1, _)          -> BlueLeft
     #     (boardSize, _) -> BlueRight
-    cdef public int cordsToInt(self, (int,int) cords):
+    cpdef public int cordsToInt(self, (int,int) cords):
         cdef int x = cords[0]
         cdef int y = cords[1]
         return (self.boardSize + 2) * (y+1) + (x+1)
 
     # inverse of cordsToInt
-    cdef public tuple intToCords(self, int cordsInt):
+    cpdef public tuple intToCords(self, int cordsInt):
         cdef int x = cordsInt%(self.boardSize + 2) - 1
         cdef int y = cordsInt//(self.boardSize + 2) - 1
         return (x,y)
@@ -399,14 +399,16 @@ cdef class Board():
 
     def getNewVCs(self, cords : Tuple[int,int], player : int) -> None:
         myVCs = self.blueVCs if (player == BLUE_PLAYER) else self.redVCs
-
+        ret   = []
 
         funcList = [self.getBridge, self.getWheel, self.getZiggurat, self.getIII1b, self.getIV1a]
         
         for i in range(0, len(funcList)):
             if vcsToCheck[i]:
-                myVCs.extend(funcList[i](cords, player))
+                ret.extend(funcList[i](cords, player))
 
+        myVCs.extend(ret)
+        #self.lastVCsAdded = (self.lastVCsAdded[1], ret)
         return None
 
     def updateWith(self, cords : Tuple[int,int], player : int) -> None:

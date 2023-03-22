@@ -13,15 +13,15 @@ any agent.
 if __name__ == '__main__':
     from alphazero.envs.hex.hex import Game, display
     from alphazero.envs.hex.players import HumanHexPlayer, GTPPlayer
-    from alphazero.envs.hex.train import args as notCompleteargs
+    from alphazero.envs.hex.train import args as notCompleteargs, hexxyAgs
     import random
     args = get_args(notCompleteargs)
 
     args.numMCTSSims = 2000
     args.arena_batch_size = 64
-    args.temp_scaling_fn = lambda x, y, z: 0
+    args.temp_scaling_fn = lambda x, y, z: 0.2
     args.add_root_noise = False
-    args.add_root_temp = False
+    args.add_root_temp = True
     #print(args)
     # all players
     # rp = RandomPlayer(g).play
@@ -30,10 +30,15 @@ if __name__ == '__main__':
     #player1 = 
     # nnet players
     nn1 = NNet(Game, args)
-    nn1.load_checkpoint('./checkpoint/hex_7x7_observing_7x7x1_Canonical_NoSwap', 'iteration-0019.pkl')
+    #print(nn1)
+
+    nn1.load_checkpoint(folder='./checkpoint/hex_9x9_observing_9x9x4_Baseline_SmallerFIXED', 
+                        filename='01-iteration-0052.pkl')
     #nn2 = nn1
     nn2 = NNet(Game, args)
-    nn2.load_checkpoint('./checkpoint/hex_7x7_observing_7x7x1_Canonical_NoSwap', 'iteration-0026.pkl')
+    nn2.load_checkpoint(folder='./checkpoint/hex_9x9_observing_9x9x4_Baseline_SmallerFIXED', 
+                        filename='01-iteration-0052.pkl')
+    #nn2 = nn1
     #player1 = nn1
     #player2 = nn1.process
 
@@ -42,7 +47,7 @@ if __name__ == '__main__':
     player1 = MCTSPlayer(game_cls=Game, nn=nn1, args=args, verbose=True)#, draw_mcts=True, draw_depth=3)
     #args2 = args.copy()
     #args2.numMCTSSims = 10
-    player2 = MCTSPlayer(game_cls=Game, nn=nn2, args=args, verbose=True)
+    player2 = MCTSPlayer(game_cls=Game, nn=nn2, args=args,  verbose=True)
     #player2 = RandomPlayer()
     #player2 = RawMCTSPlayer(Game, args)
     #player2 = GTPPlayer()

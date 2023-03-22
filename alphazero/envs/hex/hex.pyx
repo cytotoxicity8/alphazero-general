@@ -7,7 +7,7 @@
 import pyximport; 
 pyximport.install()
 #-----------------------
-
+#
 from typing import List, Tuple, Any
 
 from alphazero.Game import GameState
@@ -16,19 +16,19 @@ from alphazero.envs.hex.hexBoard import Board, BLUE_PLAYER, RED_PLAYER, EMPTY
 import numpy as np
 
 
-#
 NUM_PLAYERS             = 2
 #MULTI_PLANE_OBSERVATION = False
-BOARD_SIZE              = 7
+BOARD_SIZE              = 9
 OBSERVATION_BOARD_SIZE  = BOARD_SIZE
 MAX_TURNS               = BOARD_SIZE*BOARD_SIZE + 1
-CHANNEL_DICT            = {"OnlyBoard" : 1, "BoardAndTurn" :2, "BasicOneHot" : 3, "OneHotTurn" : 4}
-NUM_CHANNELS            = CHANNEL_DICT.get("BasicOneHot")
-            
+CHANNEL_DICT            = {"OnlyBoard" : 1, "BoardAndTurn" :2, "BasicOneHot" : 3, "OneHotTurn" : 4, "OneHotTurnWithNeuroHexLayers" : 8}
+MODE                    = "OneHotTurnWithNeuroHexLayers"
+NUM_CHANNELS            = CHANNEL_DICT.get(MODE)
+
 # This determines weather we do the flip on the board when it's red's turn to make them
 #   appear the same
-CANONICAL_STATE = True
-SWAP_MOVE = False
+CANONICAL_STATE = False
+SWAP_MOVE       = False
 
 class Game(GameState):
     def __init__(self):
@@ -63,7 +63,6 @@ class Game(GameState):
     @staticmethod
     def num_players() -> int:
         return NUM_PLAYERS
-
 
     # action == BOARD_SIZE*BOARD_SIZE means swap  
     @staticmethod
@@ -112,7 +111,7 @@ class Game(GameState):
         me = (BLUE_PLAYER, RED_PLAYER)[self.player]
         them = 3 - me
 
-        if NUM_CHANNELS == 1:
+        if MODE == "OnlyBoard":
             # We only get the basic board with default encoding i.e. blue as 1 red as 0
 
             bOneD = None
@@ -129,7 +128,7 @@ class Game(GameState):
             else:
                 return np.expand_dims(ret, axis=0)
         
-        if NUM_CHANNELS == 2:
+        if MODE == "BoardAndTurn":
             colourFlipper = lambda x : 1*(x==1) + (-1)*(x==2) + x*(x!=1 and x!=2)
             ret = np.vectorize(colourFlipper)(np.reshape(self._board.board, (BOARD_SIZE+2,BOARD_SIZE+2)))
             turn = np.full_like(ret, colourFlipper(me))
@@ -138,7 +137,7 @@ class Game(GameState):
             else:
                 return np.array([turn, ret])
 
-        if NUM_CHANNELS == 3:
+        if MODE == "BasicOneHot":
             # Base structure, the default layers are 
             #   0/1/2 Empty/yourPieces/enemyPieces
 
@@ -160,7 +159,8 @@ class Game(GameState):
                                  np.delete(np.delete(yours,[0,-1],1),[0,-1],0)])
             else:
                 return np.array([blank,mine,yours])
-        if NUM_CHANNELS == 4:
+        
+        if MODE == "OneHotTurn":
             # 0/1/2/3 Turn/Empty/BluePieces/RedPieces 
             #  Turn will just be a full layer of who's turn it is (0 for blue 1 for red)
             b      = np.reshape(self._board.board, (BOARD_SIZE+2,BOARD_SIZE+2))
@@ -177,8 +177,100 @@ class Game(GameState):
             else:
                 return np.array([turns,blank,blues,reds])
 
-        else:
-            raise ValueError('NUM_CHANNELS in hex.pyx is not set to an appropriate value')
+        if MODE == "OneHotTurnWithNeuroHexLayers":
+            # 0/1/2/3 Turn/Empty/BluePieces/RedPieces 
+            #  Turn will just be a full layer of who's turn it is (0 for blue 1 for red)
+            b      = np.reshape(self._board.board, (BOARD_SIZE+2,BOARD_SIZE+2))
+            blank  = np.where(b == 0, 1, 0)
+            blues  = np.where(b == BLUE_PLAYER, 1, 0)
+            reds   = np.where(b == RED_PLAYER, 1, 0)
+            turns  = np.full((BOARD_SIZE+2,BOARD_SIZE+2), self._player)
+
+            c                  = np.reshape(self._board.connectionBoard, (BOARD_SIZE+2,BOARD_SIZE+2))
+            # These are sets of the leaders of goups in connection board which are connected
+            #  to the appropriate sides of board (with appropriate colour)
+            blueConnectedToLeft = {(-1,0)}
+            blueConnectedToRight = {(BOARD_SIZE, 0)}
+            redConnectedToTop  = {(0,-1)}
+            redConnectedToBot  = {(0,BOARD_SIZE)}
+            
+            sets = [blueConnectedToLeft, blueConnectedToRight]
+
+            exploring = 0
+            found = True
+            while found:
+                found = False
+                for pat in self._board.blueVCs:
+                    if pat.requiredMove != None:
+                        continue;
+
+                    foundIn = False
+                    foundOut = False
+                    for cords in pat.toConnect:
+                        t = self._board.findCC(cords)
+                        foundIn  = foundIn  or t in sets[exploring]
+                        foundOut = foundOut or t not in sets[exploring]
+
+                        if foundIn and foundOut:
+                            sets[exploring] |= {self._board.findCC(c) for c in pat.toConnect}
+                            found = True
+                            break;
+                if not found and exploring == 0:
+                    found = True
+                    exploring = 1
+
+            blueConnectedToLeft  = {self._board.cordsToInt(x) for x in blueConnectedToLeft}
+            blueConnectedToRight = {self._board.cordsToInt(x) for x in blueConnectedToRight}
+
+            #print(blueConnectedToLeft)
+
+            sets = [redConnectedToTop, redConnectedToBot]
+            exploring = 0
+            found = True
+            while found:
+                found = False
+                for pat in self._board.redVCs:
+                    if pat.requiredMove != None:
+                        continue;
+
+                    foundIn = False
+                    foundOut = False
+                    for cords in pat.toConnect:
+                        t = self._board.findCC(cords)
+                        foundIn  = foundIn  and t in sets[exploring]
+                        foundOut = foundOut and t not in sets[exploring]
+
+                        if foundIn and foundOut:
+                            sets[exploring] |= {self._board.findCC(cords) for c in pat.toConnect}
+                            found = True
+                            break;
+                if not found and exploring == 0:
+                    found = True
+                    exploring = 1
+
+            redConnectedToTop = {self._board.cordsToInt(x) for x in redConnectedToTop}
+            redConnectedToBot = {self._board.cordsToInt(x) for x in redConnectedToBot}
+
+
+            blueConnectedToLeftLayer = np.where(np.isin(c, np.array(list(blueConnectedToLeft))), 1, 0)
+            blueConnectedToRightLayer = np.where(np.isin(c, np.array(list(blueConnectedToRight))), 1, 0)
+            redConnectedToTopLayer = np.where(np.isin(c, np.array(list(redConnectedToTop))), 1, 0)
+            redConnectedToBotLayer = np.where(np.isin(c, np.array(list(redConnectedToBot))), 1, 0)
+
+            if OBSERVATION_BOARD_SIZE == BOARD_SIZE:
+                return np.array([np.delete(np.delete(turns,[0,-1],1),[0,-1],0),
+                    np.delete(np.delete(blank,[0,-1],1),[0,-1],0), 
+                    np.delete(np.delete(blues,[0,-1],1),[0,-1],0),
+                    np.delete(np.delete(reds, [0,-1],1),[0,-1],0),
+                    np.delete(np.delete(blueConnectedToLeftLayer, [0,-1],1),[0,-1],0),
+                    np.delete(np.delete(blueConnectedToRightLayer, [0,-1],1),[0,-1],0),
+                    np.delete(np.delete(redConnectedToTopLayer, [0,-1],1),[0,-1],0),
+                    np.delete(np.delete(redConnectedToBotLayer, [0,-1],1),[0,-1],0)])
+            else:
+                return np.array([turns,blank,blues,reds, blueConnectedToLeftLayer,
+                    blueConnectedToRightLayer, redConnectedToTopLayer, redConnectedToBotLayer])
+
+        raise ValueError('NUM_CHANNELS in hex.pyx is not set to an appropriate value')
             
     def symmetries(self, pi, winstate) -> List[Tuple[Any, int]]:
         # Symmetry 1 : A rotation of pi about x (center of board)

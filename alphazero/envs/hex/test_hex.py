@@ -23,9 +23,8 @@ def init_board_from_moves(moves):
 
 def test_simple_moves():
     g = Game()
-    for move in [1,49,2,3,4,5]:
+    for move in [1,49]:#,2,3,4,5]:
         print(g.observation())
-        print(np.reshape(g.valid_moves()[:-1], (7,7)))
         g.play_action(move)
         print(g._board)
 
@@ -98,5 +97,8 @@ def testEfficiency():
 
 
 if __name__ == "__main__":
-    test_simple_moves()
+    g = init_board_from_moves([1, 3, 11])
+    print(g.observation())
+    print(g._board)
+    #print(np.resize(g._board.connectionBoard, (11,11)))
     #cProfile.runctx("testEfficiency()", globals(), locals(), "hexBoard_10000_random4.prof")
