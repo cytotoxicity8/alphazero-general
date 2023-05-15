@@ -1,16 +1,17 @@
-from alphazero.NNetArchitecture import ResNet, FullyConnected
+from alphazero.NNetArchitecture import ResNet, FullyConnected, GraphNet
 from alphazero.pytorch_classification.utils import Bar, AverageMeter
 from alphazero.Game import GameState
 from alphazero.utils import dotdict
 from threading import Event
 from abc import ABC, abstractmethod
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Union
 
 
 import torch.optim as optim
 import numpy as np
 import warnings
 import torch
+import torch_geometric as geo_torch
 import pickle
 import time
 import os
@@ -113,6 +114,8 @@ class NNetWrapper(BaseWrapper):
             self.nnet = ResNet(self.game_cls, args)
         elif args.nnet_type == 'fc':
             self.nnet = FullyConnected(self.game_cls, args)
+        elif args.nnet_type == 'graphnet':
+            self.nnet = GraphNet(self.game_cls, args)
         else:
             raise ValueError(f'Unknown NNet type "{args.nnet_type}"')
 
@@ -144,7 +147,11 @@ class NNetWrapper(BaseWrapper):
 
                 start = time.time()
                 self.current_step += 1
-                boards, target_pis, target_vs = batch
+                if self.args.nnet_type != "graphnet":
+                    boards, target_pis, target_vs = batch
+                else:
+                    xs, edges, target_pis, target_vs = batch
+                    boards = geo_torch.data.Data(torch.cat([*xs]), torch.cat([*edges],-1))
 
                 # predict
                 if self.args.cuda:
@@ -156,15 +163,25 @@ class NNetWrapper(BaseWrapper):
 
                 # measure data loading time
                 data_time.update(time.time() - start)
-
+                #torch.autograd.set_detect_anomaly(True)
                 # compute output
-                out_pi, out_v = self.nnet(boards)
+                # ONLY VALID not to exponentiate as the inputs should all be zeros except for one 1 
+                out_pi, out_v = self.nnet(boards, target_vs.size()[0])
+                #out_pi, out_v = torch.exp(out_pi), torch.exp(out_v)
                 l_pi = self.loss_pi(target_pis, out_pi)
                 l_v = self.loss_v(target_vs, out_v)
-                total_loss = l_pi + l_v
+                """
+                print(target_pis)
+                print(out_pi)
+
+                print("-------")
+                print(target_vs)
+                print(out_v)
+                """
+                total_loss = l_v + l_pi
                 # record loss
-                pi_losses.update(l_pi.item(), boards.size(0))
-                v_losses.update(l_v.item(), boards.size(0))
+                pi_losses.update(l_pi.item(), target_vs.size(0))
+                v_losses.update(l_v.item(), target_vs.size(0))
 
                 # compute gradient and do SGD step
                 self.optimizer.zero_grad()
@@ -200,11 +217,12 @@ class NNetWrapper(BaseWrapper):
         )
         bar.update()  # TODO: division by zero when train steps is too small (0?)
         bar.finish()
+        self.nnet.eval()
         print()
 
         return pi_losses.avg, v_losses.avg
 
-    def predict(self, board: np.ndarray):
+    def predict(self, board: Union[np.ndarray, geo_torch.data.Data], batch_size=1):
         """
         board: np array with board
         """
@@ -212,23 +230,33 @@ class NNetWrapper(BaseWrapper):
         # start = time.time()
 
         # preparing input
-        board = torch.FloatTensor(board.astype(np.float64))
+        if self.args.nnet_type != "graphnet":
+            board = torch.FloatTensor(board.astype(np.float64))
+        else:
+            board.x = torch.FloatTensor(board.x.to(torch.float))
+        
         if self.args.cuda:
             board = board.contiguous().cuda()
         with torch.no_grad():
             self.nnet.eval()
-            pi, v = self.nnet(board)
+            pi, v = self.nnet(board, batch_size)
 
             # print('PREDICTION TIME TAKEN : {0:03f}'.format(time.time()-start))
             return torch.exp(pi).data.cpu().numpy()[0], torch.exp(v).data.cpu().numpy()[0]
 
-    def process(self, batch: torch.Tensor):
-        batch = batch.type(torch.FloatTensor)
+    def process(self, batch: Union[torch.Tensor, geo_torch.data.Batch], batch_size=1):
+        if self.args.nnet_type != "graphnet":
+            batch = batch.type(torch.FloatTensor)
+        else:
+            batch.x = torch.FloatTensor(batch.x.to(torch.float))
         if self.args.cuda:
             batch = batch.cuda()
         self.nnet.eval()
         with torch.no_grad():
-            pi, v = self.nnet(batch)
+            pi, v = self.nnet(batch, batch_size)
+            #print(pi)
+            #print(v)
+
             return torch.exp(pi), torch.exp(v)
 
     def loss_pi(self, targets, outputs):
@@ -255,6 +283,7 @@ class NNetWrapper(BaseWrapper):
         filepath = os.path.join(folder, filename)
         if not os.path.exists(filepath):
             raise FileNotFoundError("No model in path {}".format(filepath))
+
 
         checkpoint = torch.load(filepath)
         args_saved = 'args' in checkpoint

@@ -1,6 +1,8 @@
 import torch.nn.functional as F
 import torch.nn as nn
+import torch_geometric.nn as geo_nn
 import torch
+import torch_geometric as geo_torch
 
 from alphazero.Game import GameState
 from alphazero.utils import dotdict
@@ -23,12 +25,20 @@ def mlp(
     output_size: int,
     output_activation=nn.Identity,
     activation=nn.ELU,
+    dropout=None,
+    batchnorm=False,
 ):
     sizes = [input_size] + layer_sizes + [output_size]
     layers = []
     for i in range(len(sizes) - 1):
         act = activation if i < len(sizes) - 2 else output_activation
         layers += [nn.Linear(sizes[i], sizes[i + 1]), act()]
+        # Only apply dropout and batchnorm after middle layers
+        if i != len(sizes) - 2:
+            if dropout != None:
+                layers += [nn.Dropout(dropout, False)]
+            if batchnorm:
+                layers += [geo_torch.nn.norm.GraphNorm(in_channels=sizes[i+1])]
     return nn.Sequential(*layers)
 
 
@@ -104,7 +114,7 @@ class ResNet(nn.Module):
             activation=nn.Identity
         )
 
-    def forward(self, s):
+    def forward(self, s, _):
         # s: batch_size x num_channels x board_x x board_y
         s = s.view(-1, self.channels, self.board_x, self.board_y)
         s = F.relu(self.bn1(self.conv1(s)))
@@ -155,12 +165,82 @@ class FullyConnected(nn.Module):
             activation=nn.Identity
         )
 
-    def forward(self, s):
+    def forward(self, s, _):
         # s: batch_size x num_channels x board_x x board_y
         # reshape s for input_fc
         s = s.view(-1, self.input_size)
         s = self.input_fc(s)
         v = self.v_fc(s)
         pi = self.pi_fc(s)
+
+        return F.log_softmax(pi/self.pst, dim=1), F.log_softmax(v/self.vst, dim=1)
+
+class GraphNet(nn.Module):
+    def __init__(self, game_cls: GameState, args: dotdict):
+        super(GraphNet, self).__init__()
+        assert args.depth > 0, "Can't make Graph Neural Network with 0 or less layers"
+        assert args.value_head_channels == args.policy_head_channels
+        
+
+        self.channels        = game_cls.observation_size()[0]
+        self.vst             = args.value_softmax_temperature
+        self.pst             = args.policy_softmax_temperature
+        
+        # GIN(in_channels: int, hidden_channels: int, num_layers: int, 
+        #    out_channels: Optional[int] = None, dropout: float = 0.0, 
+        #    act: Optional[Union[str, Callable]] = 'relu', act_first: bool = False, 
+        #    act_kwargs: Optional[Dict[str, Any]] = None, norm: Optional[Union[str, Callable]] = None, 
+        #    norm_kwargs: Optional[Dict[str, Any]] = None, jk: Optional[str] = None, **kwargs
+        # This is all the way up to 
+        norm = geo_torch.nn.norm.BatchNorm(args.num_channels)
+        self.GNNLayer  = geo_nn.GIN(self.channels, args.num_channels, args.depth, 
+            out_channels = args.depth*args.num_channels, jk = "cat", norm = norm)
+        
+        self.CatLayers = geo_nn.JumpingKnowledge("cat")
+        # This is the layer directly before the FC-v and FC-pi layers
+        self.LinearLayer = mlp(self.channels + args.depth*args.num_channels,
+            args.middle_layers, args.policy_head_channels, activation=nn.ReLU, dropout=None,
+            batchnorm=True)
+
+        self.v_fc = mlp(
+            args.value_head_channels,
+            args.value_dense_layers,
+            game_cls.num_players() + game_cls.has_draw(),
+            activation=nn.Identity
+        )
+        self.v_mean = geo_nn.pool.global_mean_pool
+
+        self.pi_fc = mlp(
+            args.policy_head_channels,
+            args.policy_dense_layers,
+            1,
+            activation=nn.Identity
+        )
+
+    # Takes a torch_geometric.data.Data Object
+    # if it is a batch must be given as a torch_geometric.data.Batch
+    def forward(self, data, batch_size):
+        #print(x)
+        #print(edge_index)
+
+        x = self.GNNLayer(data.x, data.edge_index)
+        x = self.CatLayers([data.x,x])
+        #if batch_size == 1:
+        #    print(x)
+        # If batching reshape x so that the the different graphs are seperate
+        x_size = list(x.size())
+        assert x_size[0] % batch_size == 0, f"Something has gone very wrong with batching {batch_size} graphs were inputed but the output contained a number of nodes that was not divisible by that; could be caused by inputing graphs of different sizes"
+        x = x.view(*([batch_size, x_size[0]//batch_size]+x_size[1:]))
+
+        #print(x.size())
+
+        x = self.LinearLayer(x)
+
+        v = self.v_fc(x)
+        v = self.v_mean(v, batch=None)
+        v = v.view(batch_size, -1)
+
+        pi = self.pi_fc(x)
+        pi = pi.view(batch_size, -1)
 
         return F.log_softmax(pi/self.pst, dim=1), F.log_softmax(v/self.vst, dim=1)
