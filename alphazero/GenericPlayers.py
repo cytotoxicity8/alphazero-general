@@ -7,7 +7,7 @@ from abc import ABC, abstractmethod
 
 import numpy as np
 import torch
-
+from torch_geometric.data import Batch
 
 class BasePlayer(ABC):
     def __init__(self, game_cls: GameState = None, args: dotdict = None, verbose: bool = False):
@@ -70,7 +70,7 @@ class NNPlayer(BasePlayer):
         policy, _ = self.nn.predict(state.observation())
         valids = state.valid_moves()
         options = policy * valids
-        self.temp = self.args.temp_scaling_fn(self.temp, state.turns, state.max_turns())
+        self.temp = self.args.temp_scaling_fn(self.temp, state.turns, state.max_turns()) if self.args.add_root_temp else 0
         if self.temp == 0:
             bestA = np.argmax(options)
             probs = [0] * len(options)
@@ -82,6 +82,11 @@ class NNPlayer(BasePlayer):
         choice = np.random.choice(
             np.arange(state.action_size()), p=probs
         )
+
+        if self.verbose:
+            print(f"Policy  : {policy}")
+            print(f"Value   : {_}")
+            print(f"Optoins : {options}")
 
         if valids[choice] == 0:
             print()
@@ -210,7 +215,7 @@ class RawMCTSPlayer(MCTSPlayer):
         super().__init__(None, *args, **kwargs)
         self._POLICY_SIZE = self.game_cls.action_size()
         self._POLICY_FILL_VALUE = 1 / self._POLICY_SIZE
-        self._VALUE_SIZE = self.game_cls.num_players() + 1
+        self._VALUE_SIZE = self.game_cls.num_players() + self.game_cls.has_draw()
 
     @staticmethod
     def supports_process() -> bool:
@@ -236,6 +241,10 @@ class RawMCTSPlayer(MCTSPlayer):
 
         return action
 
-    def process(self, batch: torch.Tensor):
-        return torch.full((batch.shape[0], self._POLICY_SIZE), self._POLICY_FILL_VALUE).to(batch.device), \
-               torch.zeros(batch.shape[0], self._VALUE_SIZE).to(batch.device)
+    def process(self, batch: torch.Tensor, **kwargs):
+        if isinstance(batch, Batch):
+            return torch.full((batch.num_graphs, self._POLICY_SIZE), self._POLICY_FILL_VALUE).to("cuda" if batch.is_cuda else "cpu"), \
+               torch.zeros(batch.num_graphs, self._VALUE_SIZE).to("cuda" if batch.is_cuda else "cpu")
+        else:   
+            return torch.full((batch.shape[0], self._POLICY_SIZE), self._POLICY_FILL_VALUE).to(batch.device), \
+                   torch.zeros(batch.shape[0], self._VALUE_SIZE).to(batch.device)

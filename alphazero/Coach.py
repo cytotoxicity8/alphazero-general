@@ -10,11 +10,12 @@ from alphazero.pytorch_classification.utils import Bar, AverageMeter
 
 from torch import multiprocessing as mp
 from torch.utils.data import TensorDataset, ConcatDataset, DataLoader
+from torch_geometric.data import Data, Batch
 from tensorboardX import SummaryWriter
 from glob import glob
 from queue import Empty
-from time import time
-from math import ceil, floor
+from time import time, sleep
+from math import ceil, floor, sqrt
 from enum import Enum
 
 import numpy as np
@@ -22,6 +23,7 @@ import torch
 import pickle
 import os
 import itertools
+import ctypes
 
 class ModeOfGameGen(Enum):
     # Where n = numPlayers; 
@@ -30,6 +32,8 @@ class ModeOfGameGen(Enum):
     CROSS_PRODUCT  = 0
     # Each worker will uniformly at random get assigned an i1, ..., in  and they will compute only those games
     ONE_PER_WORKER = 1
+    # A blend of the 2 above
+    ROUND_ROBIN_EVERY_TIME = 2
 
 DEFAULT_ARGS = dotdict({
     # NECESSARY TO DEFINE ARGS
@@ -85,6 +89,8 @@ DEFAULT_ARGS = dotdict({
         'trainHistoryIncrementIters': 2,
         # Weather to use population based training to train hyperparameters
         'withPopulation' : False,
+            # Useful if loading a pretrained model; makes sure network when loaded as getInitialArgs describes 
+            'forceArgs' : False,
             # See the above enum - defines what games each worker will compute in self play
             'modeOfAssigningWork' : ModeOfGameGen.ONE_PER_WORKER,
             # The number of individuals in the population
@@ -104,11 +110,10 @@ DEFAULT_ARGS = dotdict({
             #  They will be from the bottom of the round robin
             'percentageKilled' : 0.2,
             # Which net to use for compare to baseline and elo
-            #  If none will start with a round robin to calc best
-            'bestNet' : None,
+            'bestNet' : 0,
             # Defines the max deviation from original values that can happen when a new models is created
             'deviation' : 0.2,
-        # Whether to use symetries when generating games to train off of
+            # Whether to use symetries when generating games to train off of
         # if mctsCanonicalStates then must be True
         'symmetricSamples': True,
 
@@ -161,22 +166,47 @@ DEFAULT_ARGS = dotdict({
         'add_root_noise': True,
         'add_root_temp': True,
         'cpuct': 1.25,
+        # The root node is forced to play :
+        #   forcedPlayoutsMultiplier * (pi(c) * n)**0.5 playouts
+        #   per child where pi(c) is the probability acording to the policy and n is 
+        #   the number of sims run at the root node
+        #   set to 0 if none are wanted
+        # Unsure if working properly
+        'forcedPlayoutsMultiplier' : 0,
 
     # Neural Network Args
         'policy_softmax_temperature': 1.4,
         'value_softmax_temperature': 1.4,
-        'nnet_type': 'resnet',  # 'resnet' or 'fc'
+        'nnet_type': 'resnet',  # 'resnet', 'fc' or 'graphnet'
         'value_dense_layers': [1024, 512],
         'policy_dense_layers': [1024, 512],
-        # OnlyResnet
+        # In Resnet and Graphnet
+            # In Resnet   : The number of features per tile in game
+            # In Graphnet : The number of hidden features in the graph
             'num_channels': 32,
+            # In Resnet   : The number of times a Resnet is applied
+            # In Graphnet : The number of message passing happens
+            #   (so defining max radius each square can "see")
             'depth': 4,
+            # In Resnet   : The number of features for the head of value fc
             'value_head_channels': 16,
+            # In Resnet   : The number of features for the head of policy fc
             'policy_head_channels': 16,
+            # In Graphnet : Both must be same, number of features at the head 
+            #   of both fc layers
 
-        # only FC
+        # Only FC
             'input_fc_layers': [1024] * 4,  # only for fc networks
     
+        # Wierd Error with low workers/ itters on graph
+
+        # Only Graphnet
+            #normally 2x num_channels
+            'middle_layers' : [2*32],
+            #if true it will be assumed that the environment has a constant 
+            #  function which gives the edges of the graph
+            'constant_edges' : False,
+
     # Comparing to Baseline Args
     'compareWithBaseline': True,
         'baselineCompareFreq': 1,
@@ -210,6 +240,7 @@ DEFAULT_ARGS = dotdict({
 
 def get_args(args=None, **kwargs):
     new_args = DEFAULT_ARGS
+    print()
     if args:
         new_args.update(args)
     for key, value in kwargs.items():
@@ -217,6 +248,14 @@ def get_args(args=None, **kwargs):
 
     if new_args.mctsCanonicalStates:
         assert new_args.symmetricSamples, "Counting who has won with cannonical state representation of board requires symetries to get win_state into correct form"
+
+    if new_args.modeOfAssigningWork == ModeOfGameGen.ROUND_ROBIN_EVERY_TIME:
+        assert new_args.roundRobinFreq == 1, "When using ROUND_ROBIN_EVERY_TIME as mode of assiging work the frequency of round robins must be one per round"
+
+    if not new_args.compareWithPast and new_args.model_gating:
+        print("Be aware you are not comaring to past but are gating so the model that is used for self play will only be changed when you restart the program")
+    if new_args.compareWithPast and not new_args.model_gating:
+        print("You are comparing to the past and not gating so the current version will be used always even if it is suboptimal")
 
     return new_args
 
@@ -258,12 +297,15 @@ class Coach:
         self.elo_play_net_2 = nnet.__class__(game_cls, args)
         self.args = args
         self.args._num_players = self.game_cls.num_players() + self.game_cls.has_draw()
-        self.args.bestNet  = self.args.bestNet if args.withPopulation else 0
+        # If this is the first itter or no population is there
+        #  then automatically set it to 0
+        self.args.bestNet  = self.args.bestNet if (args.withPopulation and self.args.startIter != 0) else 0
 
         for i in range(0, self.numNets):
             argsi = args.copy()
             #print(args.getInitialArgs(i))
-            argsi.update(args.getInitialArgs(i))
+            if args.withPopulation:
+                argsi.update(args.getInitialArgs(i))
 
             self.train_nets[i]      = nnet.__class__(game_cls, argsi)
             self.self_play_nets[i]  = nnet.__class__(game_cls, argsi)
@@ -271,7 +313,7 @@ class Coach:
         
         train_iter = self.args.startIter
         self.trainableArgs = set() if not(args.withPopulation) else set(self.args.getInitialArgs(0).keys())
-        self.argsNotToCheck = {'startIter'}
+        self.argsNotToCheck = {'startIter', 'process_batch_size'}
         self.argsUsedInTraining = {'scheduler', 'scheduler_args', 'optimizer',
             'optimizer_args', 'lr','nnet_type','num_channels','depth','value_head_channels',
             'policy_head_channels','input_fc_layers','value_dense_layers',
@@ -290,6 +332,8 @@ class Coach:
             train_iter = self.args.startIter - 1
             for net in range(0, self.numNets): 
                 self._load_model(self.train_nets[net], train_iter, net)
+                if self.args.withPopulation and self.args.forceArgs:
+                    self.train_nets[net].args.update(args.getInitialArgs(i))
             self.args.bestNet = self.train_nets[0].args.bestNet
             del networks
 
@@ -317,6 +361,8 @@ class Coach:
         self.model_iter = self.args.startIter
         self.agents = []
         self.input_tensors = []
+        self.input_tensors2 = []
+        self.input_queues = []
         self.policy_tensors = []
         self.value_tensors = []
         self.batch_ready = []
@@ -370,6 +416,7 @@ class Coach:
             while self.model_iter <= self.args.numIters:
                 print(f'------ITER {self.model_iter}------')
                 reset = None
+                dat = [None]*5
                 if ((not self.args.skipSelfPlayIters\
                         or self.model_iter > self.args.skipSelfPlayIters)\
                     and not (self.args.train_on_past_data and self.model_iter == self.args.startIter)):
@@ -388,44 +435,48 @@ class Coach:
                     
                     if self.args.withPopulation and\
                        self.args.roundRobinAsSelfPlay and\
-                       ((self.model_iter - 1) %self.args.roundRobinFreq == 0 or\
-                        self.args.bestNet == None):
+                       ((self.model_iter - 1) %self.args.roundRobinFreq == 0):
                        reset = (self.args.modeOfAssigningWork, 
                                 self.args.startTemp,
                                 self.args.gamesPerIteration)
-                       self.args.modeOfAssigningWork = ModeOfGameGen.CROSS_PRODUCT
-                       self.args.startTemp = self.args.arenaTemp
-                       self.args.gamesPerIteration = self.args.roundRobinGames * (self.numNets**self.game_cls.num_players())
+                       if self.args.roundRobinFreq != 1:
+                           self.args.modeOfAssigningWork = ModeOfGameGen.CROSS_PRODUCT
+                           self.args.startTemp = self.args.arenaTemp
+                           self.args.gamesPerIteration = self.args.roundRobinGames * (self.numNets**self.game_cls.num_players())
 
                     selfPlay = None
                     if reset != None and self.args.compareWithPast and (self.model_iter - 1) % self.args.pastCompareFreq == 0:
                         selfPlay = self.args.arenaCompare
 
                     for i in range(self.args.workers):
-                        self.games_for_agent.append(self.gamesFor(i, selfPlay))
-                    #print(selfPlay)
+                        self.games_for_agent.append(self.gamesFor(i, self.args.workers, self.args.modeOfAssigningWork, selfPlay))
+                        print(self.games_for_agent[i])
+                    
+
                     if selfPlay != None:
                         self.args.gamesPerIteration = sum([num*len(listOfGames) for num,listOfGames in self.games_for_agent])
-    
                     self.generateSelfPlayAgents(exact = (reset != None))
     
                     self.processSelfPlayBatches(self.model_iter)
                     if self.stop_train.is_set():
                         break
+                    sleep(2)
                     self.saveIterationSamples(self.model_iter)
                     if self.stop_train.is_set():
                         break
                     dat = self.processGameResults(self.model_iter)
-
+                    
                     if reset != None:
                         self.args.modeOfAssigningWork, self.args.startTemp, self.args.gamesPerIteration = reset
-                        self.roundRobin(self.model_iter-1, dat[0], dat[1])
 
                     if self.stop_train.is_set():
                         break
                     self.killSelfPlayAgents()
                     if self.stop_train.is_set():
                         break
+
+                    if self.args.withPopulation and ((self.model_iter - 1) %self.args.roundRobinFreq == 0):
+                        self.roundRobin(self.model_iter-1, dat[0], dat[1], dat[2])
 
                 self.train(self.model_iter)
                 if self.stop_train.is_set():
@@ -440,7 +491,7 @@ class Coach:
                 if self.args.compareWithPast and (self.model_iter - 1) % self.args.pastCompareFreq == 0:
                     for net in range(0, self.numNets):
                         if reset!=None:
-                            self.compareToPast(self.model_iter-1, net, True, dat[3][net], dat[4][net])
+                            self.compareToPast(self.model_iter-1, net, True, dat[4][net], dat[5][net])
                         else:
                             self.compareToPast(self.model_iter, net)
                     if self.stop_train.is_set():
@@ -465,11 +516,11 @@ class Coach:
 
     # Tries to evenly divide up all the different combinations of self play games 
     #  between all the workers
-    def gamesFor(self, i : int, numSelfPlay = None):
-        if self.args.modeOfAssigningWork == ModeOfGameGen.CROSS_PRODUCT:
-            numPlayers = self.game_cls.num_players()
-            numWorkers = self.args.workers
-            numPerPair = round(self.args.gamesPerIteration/(self.numNets**numPlayers))
+    def gamesFor(self, i : int, numWorkers : int, modeOfAssigningWork, numSelfPlay = None):
+
+        numPlayers = self.game_cls.num_players()
+        if modeOfAssigningWork == ModeOfGameGen.CROSS_PRODUCT:
+            numPerPair = self.args.roundRobinGames
             lists = list(itertools.product(list(range(0, self.numNets)), repeat = numPlayers))
      
             step = len(lists)//numWorkers
@@ -491,11 +542,23 @@ class Coach:
 
             return (numPerPair, listOfSelfPlays + retList)
 
-        elif self.args.modeOfAssigningWork == ModeOfGameGen.ONE_PER_WORKER:
+        elif modeOfAssigningWork == ModeOfGameGen.ONE_PER_WORKER:
             nets = np.array(range(self.numNets))
 
             ret = [np.random.choice(nets) for _ in range(self.game_cls.num_players())]
             return (self.args.gamesPerIteration, [tuple(ret)])
+
+        elif self.args.modeOfAssigningWork == ModeOfGameGen.ROUND_ROBIN_EVERY_TIME:
+            proportionWorkersRobin = (self.args.roundRobinGames*(self.numNets**numPlayers))/self.args.gamesPerIteration
+            workersRobin   = ceil(proportionWorkersRobin*numWorkers)
+            workersRegular = numWorkers-workersRobin
+
+            if i < workersRobin:
+                ret = self.gamesFor(i, workersRobin, ModeOfGameGen.CROSS_PRODUCT)
+            else:
+                ret = self.gamesFor(i, workersRegular, ModeOfGameGen.ONE_PER_WORKER)
+
+            return ret
 
         else:
             raise ValueError("modeOfAssigningWork must be set to an element of ModeOfGameGen (or the mode you have picked is not implemented)")
@@ -503,12 +566,33 @@ class Coach:
     @_set_state(TrainState.INIT_AGENTS)
     def generateSelfPlayAgents(self, exact = False):
         self.stop_agents = mp.Event()
-        self.ready_queue = mp.Queue()    
+        self.ready_queue = mp.Queue()
         for i in range(self.args.workers):
-            self.input_tensors.append(torch.zeros(
-                [self.args.process_batch_size, *self.game_cls.observation_size()]
-            ))
-            self.input_tensors[i].share_memory_()
+            if self.args.nnet_type != "graphnet":
+                self.input_tensors.append(torch.zeros(
+                    [self.args.process_batch_size, *self.game_cls.observation_size()]
+                ))
+                self.input_tensors[i].share_memory_()
+                if self.args.cuda:
+                    self.input_tensors[i].pin_memory()
+            else:
+                obs_size = self.game_cls.observation_size()
+                self.input_tensors.append(torch.zeros(
+                    [self.args.process_batch_size, obs_size[1], obs_size[0]]
+                ))
+                self.input_tensors[i].share_memory_()
+                if self.args.cuda:
+                    self.input_tensors[i].pin_memory()
+
+
+                self.input_tensors2.append(torch.zeros(
+                    [self.args.process_batch_size, 2, obs_size[2]], dtype=int
+                ))
+                self.input_tensors2[i].share_memory_()
+                if self.args.cuda:
+                    self.input_tensors2[i].pin_memory()
+            
+            self.input_queues.append(mp.Queue())
 
             self.policy_tensors.append(torch.zeros(
                 [self.args.process_batch_size, self.game_cls.action_size()]
@@ -516,26 +600,27 @@ class Coach:
             self.policy_tensors[i].share_memory_()
 
             self.value_tensors.append(torch.zeros(
-                [self.args.process_batch_size, self.game_cls.num_players() + 1]
+                [self.args.process_batch_size, self.game_cls.num_players() + self.game_cls.has_draw()]
             ))
             self.value_tensors[i].share_memory_()
             self.batch_ready.append(mp.Event())
 
             if self.args.cuda:
-                self.input_tensors[i].pin_memory()
                 self.policy_tensors[i].pin_memory()
                 self.value_tensors[i].pin_memory()
 
             #print(self.gamesFor(i))
-            print(self.games_for_agent[i])
             self.agents.append(
                 SelfPlayAgent(i, self.games_for_agent[i], self.game_cls, self.ready_queue, self.batch_ready[i],
                               self.input_tensors[i], self.policy_tensors[i], self.value_tensors[i], self.file_queue,
                               self.result_queue, self.completed, self.games_played, self.stop_agents, self.pause_train,
-                              self.args, _is_warmup=self.warmup, _exact_game_count=exact)
+                              self.args, self.input_tensors2[i] if self.args.nnet_type == "graphnet" else None, _is_arena=False,  _is_warmup=self.warmup, _exact_game_count=exact)
             )
             self.agents[i].daemon = True
+
             self.agents[i].start()
+            #assert 1 ==0 
+
 
     @_set_state(TrainState.SELF_PLAY)
     def processSelfPlayBatches(self, iteration):
@@ -547,6 +632,7 @@ class Coach:
         
         nnets      = np.concatenate((nnets, othernnets))
         n = 0
+
         while self.completed.value != self.args.workers:
             if self.stop_train.is_set() and not self.stop_agents.is_set():
                 self.stop_agents.set()
@@ -554,12 +640,27 @@ class Coach:
             try:
                 id, netsNumsList = self.ready_queue.get(timeout=1)
                 #indexToNet = self.games_for_agent[id][1]
-                #print(netsNumsList)
+                #if id == 0:
+                #    print(netsNumsList)
+                #print(id)
+                #'print(self.input_queues)
                 cumulative = 0
+                if self.args.nnet_type != "graphnet":
+                    input_tensor = self.input_tensors[id]#self.input_queues[id].get()
+                else :
+                    input_x = self.input_tensors[id]
+                    input_edge = self.input_tensors2[id]
+                #print(input_tensor)
                 for net, number in netsNumsList:
                     if number == 0:
                         continue;
-                    policy, value = nnets[net].process(self.input_tensors[id][cumulative:cumulative+number])
+                    if self.args.nnet_type != "graphnet":
+                        to_process = input_tensor[cumulative:cumulative+number]
+                    else:
+                        to_process = Data(torch.cat([*input_x[cumulative:cumulative+number]]), 
+                                        torch.cat([*input_edge[cumulative:cumulative+number]],-1))
+
+                    policy, value = nnets[net].process(to_process, batch_size=number)
                     self.policy_tensors[id][cumulative: cumulative + number].copy_(policy)
                     self.value_tensors[id][cumulative: cumulative + number].copy_(value)
                     cumulative += number
@@ -589,13 +690,25 @@ class Coach:
     def saveIterationSamples(self, iteration):
         num_samples = self.file_queue.qsize()
         print(f'Saving {num_samples} samples')
-
-        data_tensor = torch.zeros([num_samples, *self.game_cls.observation_size()])
+        if self.args.nnet_type != "graphnet":
+            data_tensor = torch.zeros([num_samples, *self.game_cls.observation_size()])
+        else:
+            obs_size = self.game_cls.observation_size()
+            x_tensor    = torch.zeros([num_samples, obs_size[1], obs_size[0]])
+            edge_tensor = torch.zeros([num_samples, 2, obs_size[2]])
+        
         policy_tensor = torch.zeros([num_samples, self.game_cls.action_size()])
-        value_tensor = torch.zeros([num_samples, self.game_cls.num_players() + 1])
+        value_tensor = torch.zeros([num_samples, self.game_cls.num_players() + self.game_cls.has_draw()])
         for i in range(num_samples):
-            data, policy, value = self.file_queue.get()
-            data_tensor[i] = torch.from_numpy(data)
+            #print(i)
+            data, policy, value = self.file_queue.get() 
+            
+            if self.args.nnet_type != "graphnet":
+                data_tensor[i] = torch.from_numpy(data)
+            else:
+                x_tensor[i]    = data.x
+                if not self.args.constant_edges:
+                    edge_tensor[i] = data.edge_index
             policy_tensor[i] = torch.from_numpy(policy)
             value_tensor[i] = torch.from_numpy(value)
 
@@ -603,44 +716,55 @@ class Coach:
         filename = os.path.join(folder, get_iter_file(iteration).replace('.pkl', ''))
         if not os.path.exists(folder): os.makedirs(folder)
 
-        torch.save(data_tensor, filename + '-data.pkl', pickle_protocol=pickle.HIGHEST_PROTOCOL)
+        if self.args.nnet_type != "graphnet":
+            torch.save(data_tensor, filename + '-data.pkl', pickle_protocol=pickle.HIGHEST_PROTOCOL)
+            del data_tensor
+        else:
+            torch.save(x_tensor, filename + '-xdata.pkl', pickle_protocol=pickle.HIGHEST_PROTOCOL)
+            if not self.args.constant_edges:
+                torch.save(edge_tensor, filename + '-edgedata.pkl', pickle_protocol=pickle.HIGHEST_PROTOCOL)
+            del x_tensor
+            del edge_tensor
+
+
         torch.save(policy_tensor, filename + '-policy.pkl', pickle_protocol=pickle.HIGHEST_PROTOCOL)
         torch.save(value_tensor, filename + '-value.pkl', pickle_protocol=pickle.HIGHEST_PROTOCOL)
-        del data_tensor
         del policy_tensor
         del value_tensor
 
     @_set_state(TrainState.PROCESS_RESULTS)
     def processGameResults(self, iteration):
-        num_games = self.result_queue.qsize()
         wins, draws, numAvgGameLength, self_wins, self_draws = get_game_results(self.numNets, self.result_queue, self.game_cls)
-        
-        numWins = np.sum(wins, axis = tuple(range(len(wins.shape) - 1)))
-        numDraws = np.sum(draws)
 
-        numPlayers = self.game_cls.num_players()
+        numWins        = np.sum(wins, axis = tuple(range(len(wins.shape) - 1)))
+        numDraws       = np.sum(draws)
+        numNormalGames = np.sum(numWins) + numDraws
+        numPlayers     = self.game_cls.num_players()
 
         for i in range(numPlayers):
             self.writer.add_scalar(f'win_rate/player{i}', (
                     numWins[i] + (numDraws/numPlayers if self.args.use_draws_for_winrate else 0))/ 
-                    num_games, iteration)
-        self.writer.add_scalar('win_rate/draws', numDraws / num_games, iteration)
+                    numNormalGames, iteration)
+        self.writer.add_scalar('win_rate/draws', numDraws / numNormalGames, iteration)
         self.writer.add_scalar('win_rate/avg_game_length', numAvgGameLength, iteration)
         
 
-        totalWins  = np.zeros(self.numNets)
-        totalDraws = np.zeros(self.numNets)
+        totalWins    = np.zeros(self.numNets)
+        totalDraws   = np.zeros(self.numNets)
+        totalGamesBy = np.zeros(self.numNets)
 
-        for win, numWins in np.ndenumerate(wins):
-            if numWins == 0:
+        for win, numWins1 in np.ndenumerate(wins):
+            if numWins1 == 0:
                 continue;
             whoWon  = win[-1]
-            totalWins[win[whoWon]] += numWins
+            totalWins[win[whoWon]] += numWins1
+            for p in win[:-1]:
+                totalGamesBy[p] += numWins1
         
         for draw, numDraws in np.ndenumerate(draws):
             if numDraws == 0:
                 continue;
-            for p in draw:
+            for p in (draw):
                 totalDraws[p] += numDraws
 
         totalSelfWins  = np.zeros((self.numNets,2))
@@ -662,7 +786,7 @@ class Coach:
         #print(totalSelfWins)
         #print(totalSelfDraws)
 
-        return totalWins, totalDraws, numAvgGameLength, totalSelfWins, totalSelfDraws
+        return totalWins, totalDraws, totalGamesBy, numAvgGameLength, totalSelfWins, totalSelfDraws
 
     @_set_state(TrainState.KILL_AGENTS)
     def killSelfPlayAgents(self):
@@ -692,6 +816,7 @@ class Coach:
 
         self.agents = []
         self.input_tensors = []
+        #self.input_queues = []
         self.policy_tensors = []
         self.value_tensors = []
         self.batch_ready = []
@@ -713,23 +838,34 @@ class Coach:
             )
             
             try:
-                data_tensor = torch.load(filename + '-data.pkl')
+                if self.args.nnet_type != "graphnet":
+                    data_tensor = torch.load(filename + '-data.pkl')
+                else:
+                    x_tensor    = torch.load(filename + '-xdata.pkl')
+                    if not self.args.constant_edges:
+                        edge_tensor = torch.load(filename + '-edgedata.pkl').to(int)
+                    else:
+                        edge_tensor = self.game_cls.get_edges().expand(x_tensor.size(0), 2, self.game_cls.observation_size()[2])
                 policy_tensor = torch.load(filename + '-policy.pkl')
                 value_tensor = torch.load(filename + '-value.pkl')
             except FileNotFoundError as e:
                 print('Warning: could not find tensor data. ' + str(e))
                 return
-            
-            tensor_dataset_list.append(
-                TensorDataset(data_tensor, policy_tensor, value_tensor)
-            )
+            if self.args.nnet_type != "graphnet":
+                tensor_dataset_list.append(
+                    TensorDataset(data_tensor, policy_tensor, value_tensor)
+                )
+            else:
+                tensor_dataset_list.append(
+                    TensorDataset(x_tensor, edge_tensor, policy_tensor, value_tensor)
+                )
             nonlocal num_train_steps
             if self.args.averageTrainSteps:
                 nonlocal sample_counter
-                num_train_steps += data_tensor.size(0)
+                num_train_steps += policy_tensor.size(0)
                 sample_counter += 1
             else:
-                num_train_steps = data_tensor.size(0)
+                num_train_steps = policy_tensor.size(0)
 
         def train_data(tensor_dataset_list, train_on_all=False):
             dataset = ConcatDataset(tensor_dataset_list)
@@ -755,6 +891,10 @@ class Coach:
                     print()
             else:
                 for toTrain in range(0, self.numNets):
+                    dataset = ConcatDataset(tensor_dataset_list)
+                    dataloader = DataLoader(dataset, batch_size=self.args.train_batch_size, shuffle=True,
+                                    num_workers=self.args.workers, pin_memory=True)
+            
                     result[0][toTrain], result[1][toTrain] = self.train_nets[toTrain].train(dataloader, train_steps)
     
 
@@ -959,16 +1099,50 @@ class Coach:
         # self.writer.add_scalar("hyperparmeters/ROOT_NOISE_FRAC", params[best].root_noise_frac, self.model_iter)
     
     @_set_state(TrainState.ROUND_ROBIN)
-    def roundRobin(self, iteration, wins, draws):
+    def roundRobin(self, iteration, wins, draws, gamesBy):
         print('PERFORMING ROUND ROBIN ANALYSIS')
         print()
-        totalWins  = wins
-        numPlayers = self.game_cls.num_players()
+
+        if (wins is None) or (draws is None) or (gamesBy is None):
+            wins    = np.zeros(self.numNets)
+            draws   = np.zeros(self.numNets)
+            gamesBy = np.zeros(self.numNets)
+            
+            #cls = MCTSPlayer if self.args.arenaMCTS else NNPlayer
+            #allPlayers = [cls(net, self.game_cls, self.args) for net in self.train_nets]
+            numPlayers = self.game_cls.num_players()
+            #toProcess  = list(itertools.product(list(range(0, self.numNets)), repeat = numPlayers))
+            numPer     = self.args.roundRobinGames
+            
+            temp = self.args.gamesPerIteration, self.args.process_batch_size
+            
+            self.args.gamesPerIteration = self.args.roundRobinGames * (self.numNets**self.game_cls.num_players())
+            self.args.process_batch_size = 48
+
+            for i in range(self.args.workers):
+                self.games_for_agent.append(self.gamesFor(i, self.args.workers, ModeOfGameGen.CROSS_PRODUCT))
+                print(self.games_for_agent[i])
+
+            self.generateSelfPlayAgents(exact=True)
+            self.processSelfPlayBatches(self.model_iter)
+
+            dat = self.processGameResults(self.model_iter)
+            self.killSelfPlayAgents()
+
+            self.args.gamesPerIteration, self.args.process_batch_size = temp
+            wins, draws, gamesBy = dat[0], dat[1], dat[2]
+
+        totalWins    = wins
+        totalGamesBy = gamesBy
+        numPlayers   = self.game_cls.num_players()
 
         if self.args.use_draws_for_winrate:
             totalWins += draws/numPlayers
+            totalGamesBy += draws
 
-        ranking = np.argsort(totalWins)
+        totalWinsProportion =  totalWins/ totalGamesBy
+
+        ranking = np.flip(np.argsort(totalWinsProportion))
 
         self.args.bestNet = ranking[0]
 
@@ -1002,9 +1176,6 @@ class Coach:
 
         print(f'NEW BEST NET IS {self.args.bestNet}')
         
-
-
-
     @_set_state(TrainState.COMPARE_PAST)
     def compareToPast(self, model_iter, player, usePreLoad = False,preLoadedWins = None, preLoadedDraws = None):
         print(f'PITTING P{player} AGAINST ITERATION {self.self_play_iter[player]}')

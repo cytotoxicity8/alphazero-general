@@ -14,8 +14,9 @@ import numpy as np
 import torch
 import random
 import time
+from torch_geometric.data import Batch
 
-##
+
 class _PlayerStats:
     def __init__(self, index):
         self.index = index
@@ -242,7 +243,7 @@ class Arena:
                 ))
                 policy_tensors[i].share_memory_()
 
-                value_tensors.append(torch.zeros([self.args.arena_batch_size, self.game_cls.num_players() + 1]))
+                value_tensors.append(torch.zeros([self.args.arena_batch_size, (self.game_cls.num_players() + self.game_cls.has_draw())]))
                 value_tensors[i].share_memory_()
 
                 batch_ready.append(mp.Event())
@@ -251,7 +252,7 @@ class Arena:
                     value_tensors[i].pin_memory()
 
                 self._agents.append(
-                    SelfPlayAgent(i, (100000000, [(0,0)]), self.game_cls, ready_queue, batch_ready[i], input_tensors, policy_tensors[i], value_tensors[i], batch_queues[i], result_queue, completed, games_played, self.stop_event, self.pause_event, self.args, _is_arena=True))
+                    SelfPlayAgent(i, (100000000, [(0,0)]), self.game_cls, ready_queue, batch_ready[i], batch_queues[i], policy_tensors[i], value_tensors[i], batch_queues[i], result_queue, completed, games_played, self.stop_event, self.pause_event, self.args, _is_arena=True))
                 self._agents[i].daemon = True
                 self._agents[i].start()
 
@@ -268,10 +269,22 @@ class Arena:
                     data = batch_queues[id].get()
                     for player in range(len(self.players)):
                         batch = data[player]
-                        if not isinstance(batch, list):
-                            p, v = (self.players[player]).process(batch)
-                            policy.append(p.to(policy_tensors[id].device))
-                            value.append(v.to(value_tensors[id].device))
+                        if batch == []:
+                            continue;
+                        #if not isinstance(batch, list):
+                        batch_size = None
+                        if self.args.nnet_type == "graphnet":
+                            batch_size = len(batch)
+                            batch = Batch.from_data_list(batch)
+
+                        p, v = (self.players[player]).process(batch, batch_size=batch_size)
+                        policy.append(p.to(policy_tensors[id].device))
+                        value.append(v.to(value_tensors[id].device))
+
+                    #print(torch.cat(policy).size())
+                    ##print(policy_tensors[id].size())
+                    #print((value))
+                    #print(value_tensors[id].size())
 
                     policy_tensors[id].copy_(torch.cat(policy))
                     value_tensors[id].copy_(torch.cat(value))

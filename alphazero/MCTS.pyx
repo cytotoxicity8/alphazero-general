@@ -22,7 +22,6 @@ _DRAW_VALUE = 0.5
 
 np.seterr(all='raise')
 
-
 """
 def rebuild_node(children, a, cpuct, num_players, e, q, n, p, player):
     childs = []
@@ -57,13 +56,21 @@ cdef class Node:
     cdef public int player
 
     def __init__(self, int action, int num_players):
+        # The children of the node
         self._children = []
+        # The action which got me here
         self.a = action
+        # The end evaluation of the state (i.e. winstate)
         self.e = np.zeros(num_players, dtype=np.uint8)
+        # (I THINK) how good this node would be to go to from it's parent
         self.q = 0
+        # The valuation of how good this position is for self.player
         self.v = 0
+        # Number of times this node has been reached
         self.n = 0
+        # The probability of playing this node from it's parent (acording to policy)
         self.p = 0
+        # Who's turn is it
         self.player = 0
 
     def __repr__(self):
@@ -86,16 +93,21 @@ cdef class Node:
     cdef float uct(self, float sqrt_parent_n, float fpu_value, float cpuct):
         return (fpu_value if self.n == 0 else self.q) + cpuct * self.p * sqrt_parent_n / (1 + self.n)
 
-    cdef Node best_child(self, float fpu_reduction, float cpuct):
+    cdef Node best_child(self, float fpu_reduction, float cpuct, float fpm):
         cdef Node c
         cdef float seen_policy = sum([c.p for c in self._children if c.n > 0])
         cdef float fpu_value = self.v - fpu_reduction * sqrt(seen_policy)
         cdef float cur_best = -float('inf')
         cdef float sqrt_n = sqrt(self.n)
+        #cdef float forced = fpm * sqrt_n
         cdef float uct
         child = None
 
         for c in self._children:
+            # enforces minimum forced playouts
+            #if forced*sqrt(c.p) > c.n:
+            #    return c
+
             uct = c.uct(sqrt_n, fpu_value, cpuct)
             if uct > cur_best:
                 cur_best = uct
@@ -130,6 +142,7 @@ cdef class MCTS:
     cdef public int max_depth
     cdef public int _discount_max_depth
     cdef public int canonical_state
+    cdef public float forcedPlayoutsMultiplier
 
     def __init__(self, args: dotdict):
         self.root_noise_frac = args.root_noise_frac
@@ -144,7 +157,8 @@ cdef class MCTS:
         self.depth = 0
         self.max_depth = 0
         self._discount_max_depth = 0
-        self.canonical_state = args.mctsCanonicalStates
+        self.canonical_state          = args.mctsCanonicalStates
+        self.forcedPlayoutsMultiplier = args.forcedPlayoutsMultiplier
 
     def __repr__(self):
         return 'MCTS(root_noise_frac={}, root_temp={}, min_discount={}, fpu_reduction={}, cpuct={}, _num_players={}, ' \
@@ -153,6 +167,7 @@ cdef class MCTS:
                     self.fpu_reduction,self.cpuct, self._num_players, self._root,
                     self._curnode, self._path, self.depth, self.max_depth)
 
+    # Sets the mcts back to the start for reuse
     cpdef void reset(self):
         self._root = Node(-1, self._num_players)
         self._curnode = self._root
@@ -171,20 +186,17 @@ cdef class MCTS:
 
         for _ in range(sims):
             leaf = self.find_leaf(gs)
-            p, tv = nn(leaf.observation())
-            v = np.zeros_like(tv)
-            if self.canonical_state:
-                v[leaf._player] = tv[0]
-                v[1-leaf._player] = tv[1]
-                v[2]  = tv[2]
-            else:
-                v = tv
+            p, v = nn(leaf.observation())
+            if self.canonical_state and leaf._player == 1:
+                t = v[1]
+                v[1] = v[0]
+                v[0] = t
 
             self.process_results(leaf, v, p, add_root_noise, add_root_temp)
 
     cpdef void raw_search(self, object gs, int sims, bint add_root_noise, bint add_root_temp):
         cdef Py_ssize_t policy_size = gs.action_size()
-        cdef float[:] v = np.zeros(gs.num_players() + 1, dtype=np.float32)  #np.full((value_size,), 1 / value_size, dtype=np.float32)
+        cdef float[:] v = np.zeros(gs.num_players() + gs.has_draw(), dtype=np.float32)  #np.full((value_size,), 1 / value_size, dtype=np.float32)
         cdef float[:] p = np.full(policy_size, 1, dtype=np.float32)
         self.max_depth = 0
 
@@ -215,13 +227,18 @@ cdef class MCTS:
         for n, c in zip(noise, self._root._children):
             c.p = c.p * (1 - self.root_noise_frac) + self.root_noise_frac * n
 
+    # Goes from root down to an end state or an unexplored node of the game 
+    #  following the best child path as given by current fpu reduction and cpuct
+    #  Also the root has some number of forced playouts
     cpdef object find_leaf(self, object gs):
         self.depth = 0
         self._curnode = self._root
         cdef object leaf = gs.clone()
+
         while self._curnode.n > 0 and not self._curnode.e.any():
             self._path.append(self._curnode)
-            self._curnode = self._curnode.best_child(self.fpu_reduction, self.cpuct)
+            self._curnode = self._curnode.best_child(self.fpu_reduction, self.cpuct,\
+                self.forcedPlayoutsMultiplier if self.depth == 0 else 0)
             leaf.play_action(self._curnode.a)
             self.depth += 1
 
@@ -273,6 +290,7 @@ cdef class MCTS:
         cdef int i = 0
         while self._path:
             parent = self._path.pop()
+            # v is how good this node is for player of the parent node
             v = self._get_value(value, parent.player, num_players)
 
             # apply discount only to current node's Q value
@@ -287,7 +305,7 @@ cdef class MCTS:
 
             # scale value to the range [-1, 1]
             # v = 2 * v * discount - 1
-
+            # Update q to represent the waited sum by discount of how good this code is to it's parent
             self._curnode.q = (self._curnode.q * self._curnode.n + v * discount) / (self._curnode.n + 1)
             if self._curnode.n == 0:
                 self._curnode.v = self._get_value(value, self._curnode.player, num_players)  # * 2 - 1
@@ -303,13 +321,45 @@ cdef class MCTS:
         else:
             return value[player]
 
+    # Returns the final root playout distribution 
     cpdef int[:] counts(self, object gs):
         cdef int[:] counts = np.zeros(gs.action_size(), dtype=np.int32)
+        #cdef Node highestPlayout = self._root._children[0]
+        #cdef float highestPUCT = 0
         cdef Node c
+        #cdef float seen_policy = sum([c.p for c in self._root._children if c.n > 0])
+        #cdef float fpu_value = self._root.v - self.fpu_reduction * sqrt(seen_policy)
+        #cdef float sqrt_n = sqrt(self._root.n)
+        #cdef float forcedM = self.forcedPlayoutsMultiplier * sqrt_n
+        #cdef int maxSubtract
         #print(self._root)
         #print(self._root._children)
+        # Calculate it
         for c in self._root._children:
+            #if c.n > highestPlayout.n:
+            #    highestPlayout = c
             counts[c.a] = c.n
+
+        #highestPUCT = highestPlayout.uct(sqrt_n, fpu_value, self.cpuct)
+        #print(np.asarray(counts))
+        #print(highestPUCT)
+
+        # Here due to the forced playouts we need to perform some policy target pruning
+        #if forcedM > 0:
+        #    for c in self._root._children:
+        #        if c == highestPlayout:
+        #            continue;
+        #        # This finds the number of N(c) that would give parity (roughly) between
+        #        #  the max PUCT and this puct
+        #        maxSubtract = int(min(forcedM * sqrt(c.p), c.n + 1 - self.cpuct * c.p * sqrt_n / (highestPUCT - c.q)))
+        #        #print(self.cpuct * c.p * sqrt_n / (highestPUCT - c.q)-1)
+        #        #print(forcedM * sqrt(c.p))
+        #        #print(c.a, maxSubtract)
+        #        if counts[c.a] - maxSubtract <= 1:
+        #            counts[c.a] = 0
+        #        else:
+        #            counts[c.a] -= maxSubtract
+
         #print(np.asarray(counts))
         return np.asarray(counts)
 

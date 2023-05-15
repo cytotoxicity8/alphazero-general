@@ -39,6 +39,12 @@ cdef class GameState:
             observation_size: the shape of observations of the current state,
                              must be in the form channels x width x height.
                              If only one plane is needed for observation, use 1 for channels.
+
+            If using a graph it should be channels x nodes x edges 
+              Note that the latter 2 are only important when training
+              Also note that nodes must be in 1 to 1 corrispondance with actions - so if there are 
+             extra nodes added to the game then they must be represented as actions which are never
+             takable
         """
         pass
 
@@ -84,6 +90,7 @@ cdef class GameState:
 
     cpdef float[:, :, :] observation(self):
         """Get an observation from the game state in the form of a numpy array with the size of self.observation_size"""
+        """It can also be in the form of a torch_geometric.data.Data"""
         pass
 
     cpdef list symmetries(self, float[:] pi, float[:] value):

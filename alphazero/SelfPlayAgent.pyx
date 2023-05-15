@@ -8,15 +8,16 @@ import itertools
 import time
 
 from alphazero.MCTS import MCTS
+from torch_geometric.data import Data
 
 
-##
+
 class SelfPlayAgent(mp.Process):
     def __init__(self, id, whoVwhoComputing, game_cls, ready_queue, batch_ready, batch_tensor, policy_tensor,
                  value_tensor, output_queue, result_queue, complete_count, games_played,
-                 stop_event: mp.Event, pause_event: mp.Event(), args, _is_arena=False, _is_warmup=False, _exact_game_count=False):
+                 stop_event: mp.Event, pause_event: mp.Event(), argss, *args, _is_arena=False, _is_warmup=False, _exact_game_count=False):
         super().__init__()
-
+        #print(_is_arena)
         self.id = id
         self.numPer = whoVwhoComputing[0]
         self.listToCompute = whoVwhoComputing[1]
@@ -28,11 +29,14 @@ class SelfPlayAgent(mp.Process):
         self.ready_queue = ready_queue
         self.batch_ready = batch_ready
         self.batch_tensor = batch_tensor
+        if args:
+            self.batch_tensor2 = args[0]
+        #self.batch_queue = batch_queue
         
-        if _is_arena:
-            self.batch_size = policy_tensor.shape[0]
-        else:
-            self.batch_size = self.batch_tensor.shape[0]
+        #if _is_arena:
+        self.batch_size = policy_tensor.shape[0]
+        #else:
+        #    self.batch_size = self.batch_tensor.shape[0]
         
         self.policy_tensor = policy_tensor
         self.value_tensor = value_tensor
@@ -48,7 +52,8 @@ class SelfPlayAgent(mp.Process):
         self.complete_count = complete_count
         self.stop_event = stop_event
         self.pause_event = pause_event
-        self.args = args
+        self.args = argss
+        #print(self.args)
 
         self._is_arena         = _is_arena
         self._is_warmup        = _is_warmup
@@ -61,7 +66,7 @@ class SelfPlayAgent(mp.Process):
         if _is_warmup:
             action_size = game_cls.action_size()
             self._WARMUP_POLICY = torch.full((action_size,), 1 / action_size).to(policy_tensor.device)
-            value_size = game_cls.num_players() + 1
+            value_size = game_cls.num_players() + game_cls.has_draw()
             self._WARMUP_VALUE = torch.full((value_size,), 1 / value_size).to(policy_tensor.device)
         self.fast = False
 
@@ -104,7 +109,7 @@ class SelfPlayAgent(mp.Process):
         if netToAdd>= len(self.listToCompute):
             if self._exact_game_count:
                 return
-            self.netsGoing += [0 for _ in range(self.listToCompute)]
+            self.netsGoing += [0 for _ in range(len(self.listToCompute))]
             self.listToCompute *= 2
 
         self.netsGoing[netToAdd] +=1
@@ -132,15 +137,18 @@ class SelfPlayAgent(mp.Process):
     #   (net, a) follows (net, b) for any net, a or b
     def getNetNums(self):
         ret = []
-        for game in self.listToCompute:
-            #print(game)
+        for i in range(len(self.listToCompute)):
+            game     = self.listToCompute[i]
+            numGoing = self.netsGoing[i]
+            
+            if numGoing == 0:
+                continue;
+
             if len(ret) > 0 and game[self.whichPlayerNext] == ret[-1][0]:
-                ret[-1] = (ret[-1][0], ret[-1][1] + self.numPer)
+                ret[-1] = (ret[-1][0], ret[-1][1] + numGoing)
             else:
-                ret.append((game[self.whichPlayerNext], self.numPer))
+                ret.append((game[self.whichPlayerNext], numGoing))
         return ret
-
-
 
     def removeFromComputing(self, index):
         i = self.getNetIndex(index)
@@ -151,7 +159,6 @@ class SelfPlayAgent(mp.Process):
         del (self.mcts[index])
         del (self.temps[index])
         del (self.next_reset[index])
-
 
     def run(self):
         try:
@@ -166,6 +173,8 @@ class SelfPlayAgent(mp.Process):
                     self.generateBatch()
                     if self.stop_event.is_set(): break
                     self.processBatch()
+
+                #print("readytodorealmove")
 
                 if self.stop_event.is_set(): break
                 self.playMoves()
@@ -183,7 +192,7 @@ class SelfPlayAgent(mp.Process):
         if self._is_arena:
             batch_tensor = [[] for _ in range(self.game_cls.num_players())]
             self.batch_indices = [[] for _ in range(self.game_cls.num_players())]
-        
+
         for i in range(len(self.games)):
             self._check_pause()
             state = self._mcts(i).find_leaf(self.games[i])
@@ -191,26 +200,55 @@ class SelfPlayAgent(mp.Process):
                 self.policy_tensor[i].copy_(self._WARMUP_POLICY)
                 self.value_tensor[i].copy_(self._WARMUP_VALUE)
                 continue
-            data = torch.from_numpy(state.observation())
+            if self.args.nnet_type != "graphnet":
+                data = torch.from_numpy(state.observation())
+            else:
+                data = state.observation()
 
             if self._is_arena:
-                data = data.view(-1, *state.observation_size())
+                if self.args.nnet_type != "graphnet":
+                    data = data.view(-1, *state.observation_size())
                 player = self.player_to_index[self.games[i].player]
                 batch_tensor[player].append(data)
                 self.batch_indices[player].append(i)
             else:
-                self.batch_tensor[i].copy_(data)
+                if self.args.nnet_type != "graphnet":
+                    self.batch_tensor[i].copy_(data)
+                else:
+                    self.batch_tensor[i].copy_(data.x)
+                    self.batch_tensor2[i].copy_(data.edge_index)
+                    #print(data)
+                    #print(self.batch_tensor[i])
+                    #data.share_memory_()
+                    #self.batch_tensor[i].x = (data.x)
+                    #self.batch_tensor[i].edge_index = (data.edge_index)
+
+                #batch_tensor.append(data)
+                #self.batch_tensor[i].copy_(data)
 
         if self._is_arena:
             for player in range(self.game_cls.num_players()):
                 player = self.player_to_index[player]
                 data = batch_tensor[player]
-                if data:
-                    batch_tensor[player] = torch.cat(data)
+                if self.args.nnet_type != "graphnet" and data != []:
+                    data = torch.cat(data)
+                if data != []:
+                    batch_tensor[player] = data
             self.output_queue.put(batch_tensor)
             self.batch_indices = list(itertools.chain.from_iterable(self.batch_indices))
+        #elif self.args.nnet_type == "graphnet":
+            #print(self.batch_queue)
+            #self.batch_queue.put(self.batch_tensor)
+        #else:
+        #    if self.args.nnet_type != "graphnet":
+        #        self.batch_tensor.copy_(torch.cat(batch_tensor))#self.batch_queue.put(torch.cat(batch_tensor))
+        #    else:
+                #print(batch_tensor)
+        #        self.batch_tensor.update(Batch.from_data_list(batch_tensor))
+
 
         if not self._is_warmup:
+            #print("ready")
             # ID, the list of what nets and how many are found in the data sent so to best batch
             self.ready_queue.put((self.id, self.getNetNums()))
 
@@ -281,6 +319,7 @@ class SelfPlayAgent(mp.Process):
                                 self.output_queue.put((
                                     state.observation(), pi, np.array(true_winstate, dtype=np.float32)
                                 ))
+
                     toRem.append(i)
                 else:
                     lock.release()
