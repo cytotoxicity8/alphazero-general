@@ -47,16 +47,17 @@ def saveIterationSamples(iteration, output, game_cls):
     num_samples = output.qsize()
     print(f'Saving {num_samples} samples')
 
-    data_tensor = torch.zeros([num_samples, *game_cls.observation_size()])
+    obs_size = game_cls.observation_size()
+    data_tensor = torch.zeros([num_samples, *obs_size])        
     policy_tensor = torch.zeros([num_samples, game_cls.action_size()])
-    value_tensor = torch.zeros([num_samples, game_cls.num_players() + 1])
+    value_tensor = torch.zeros([num_samples, game_cls.num_players() + game_cls.has_draw()])
     for i in range(num_samples):
         data, policy, value = output.get()
         data_tensor[i] = torch.from_numpy(data)
         policy_tensor[i] = torch.from_numpy(policy)
         value_tensor[i] = torch.from_numpy(value)
 
-    folder = "data/human4layers"
+    folder = "data/human"
     filename = os.path.join(folder, get_iter_file(iteration).replace('.pkl', ''))
     if not os.path.exists(folder): os.makedirs(folder)
 
@@ -137,34 +138,46 @@ def main():
         n = 0
         for gID, result, r1, r2, moveList in data1:
             n+=1
-            #if (n < 6) : continue
+            #if (n < 2) : continue
+            #print(moveList)
             #print(n)
             g = game_cls()
-            
-            winstate = np.array([result == 2,result == 0,False])
+            if moveList[1] == (-10, -10):
+                winstate = np.array([result == 0,result == 2])
+            else:        
+                winstate = np.array([result == 2,result == 0])
             #print(winstate)
-            for move in moveList:
+
+            for moveNumber, move in enumerate(moveList):
                 #print(move)
-                #print(g._board)
                 if (move == (-10, -10)):
-                    trueMove = 13*13
+                    continue;
                 else:
                     if CANONICAL_STATE and g._player == 1:
                         move = g._board.pairflipInXPlusYCorrection(move)
-                    trueMove = move[1] * 13 + move[0]
-                assert (trueMove>=0 and trueMove<=13*13)
+
+                    if moveList[1] == (-10, -10) and moveNumber == 0:
+                        #print(move)
+                        move = (move[1],move[0])
+                        #print(move)
+
+                    trueMove = (move[1]) * 13 + (move[0])
+                assert (trueMove>=0 and trueMove<=15*15)
                 # Maybe Add noise?
                 pi = np.zeros(13*13+1, dtype=np.float32)
                 pi[trueMove] = 1
 
-                #----------------------
-                data = g.symmetries(pi, winstate)
-                for state, pi, true_winstate in data:
-                    #print(state.observation(), pi, np.array(true_winstate, dtype=np.float32))
-                    out.put((
-                        state.observation(), pi, np.array(true_winstate, dtype=np.float32)
-                    ))
-                g.play_action(trueMove)
+                #print(g._board)
+                #print(g._board)
+                if moveNumber>=2:
+                    #----------------------
+                    data = g.symmetries(pi, winstate)
+                    for state, pi, true_winstate in data:
+                        #print(state.observation(), pi, np.array(true_winstate, dtype=np.float32))
+                        out.put((
+                            state.observation(), pi, np.array(true_winstate, dtype=np.float32)
+                        ))
+                    g.play_action(trueMove)
             if n%100 == 0:
                 print('.', end = '', flush=True)
             if n%5000 == 0:

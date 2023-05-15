@@ -58,13 +58,13 @@ RED_PLAYER = 2
 GREEN_PLAYER = 3
 ERROR = -10
 SWAP  = -9
-SWAP_MOVE = False
+
 CHECK_FOR_EDGE_TEMPLATES_INTERNAL = False
             # Brdige, Wheel, Ziggurat, III1b, IV1a, 
-vcsToCheck = [True,  False, False,    False, False]
+vcsToCheck = [True, False,  True,    False, False]
 
 SHOW_VCs = any(vcsToCheck)
-
+print(f"VC's Checking {vcsToCheck}")
 
 cdef class Board():
     # Players
@@ -536,6 +536,10 @@ cdef class Board():
 
                     pairs = [p for p in unPreProcessedpairs if (self.get(p[0]) != me and self.get(p[1]) != me)]
 
+                    if not(all(map(self.isValid, connectingTo))):
+                        continue;
+
+
                     if all([self.get(cord) == me for cord in connectingTo]) and \
                        all([(self.get(cord) == self.EMPTY and not(self.isEdge(cord)))
                             for pairCords in pairs for cord in pairCords]):
@@ -634,6 +638,9 @@ cdef class Board():
                                        (offBy((offi - 3, offj + 3)), offBy((offi - 2, offj + 3))), #9
                                        (offBy((offi - 1, offj + 3)), offBy((offi + 0, offj + 3))), #α
                                        (offBy((offi + 1, offj + 3)), offBy((offi + 2, offj + 3)))] #β
+
+                if not(all(map(self.isvalid, connectingTo))):
+                    continue;
 
                 pairs = [p for p in unPreProcessedpairs if (self.get(p[0]) != me and self.get(p[1]) != me)]
 

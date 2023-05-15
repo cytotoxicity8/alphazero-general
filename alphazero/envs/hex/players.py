@@ -7,6 +7,9 @@ from alphazero.envs.hex.hex import BOARD_SIZE
 from alphazero.envs.hex.hexBoard import BLUE_PLAYER, RED_PLAYER
 
 class HumanHexPlayer(BasePlayer):
+    def __init__(self, args):
+        self.args = args
+
     @staticmethod
     def is_human() -> bool:
         return True
@@ -22,13 +25,14 @@ class HumanHexPlayer(BasePlayer):
 
 
 class GTPPlayer(BasePlayer):
-    LOCATION = "~/Hex-Project/benzene-vanilla-cmake/build/src/wolve/wolve"
-    commands = ['boardsize {0}'.format(BOARD_SIZE), 
-    'param_wolve max_time 0.5']#, 
+    LOCATION = "~/Hex-Project/benzene-vanilla-cmake/build/src/mohex/mohex"
+    commands = ['boardsize {0}'.format(BOARD_SIZE)]#, 
+    #'param_wolve max_time 0.5']#, 
     #'param_wolve use_time_management 1',
     #'param_wolve use_parallel_solver 1']
     playerCorrispondance = {1 : "black", 0 : "white"}
-    def init(self, *args, **kwargs):
+    def init(self, args, **kwargs):
+        self.args = args
         try:
             self.p.terminate()
         except:
@@ -44,7 +48,7 @@ class GTPPlayer(BasePlayer):
 
     def reset(self) -> None:
         self.playerCorrispondance = {1 : "black", 0 : "white"}
-        self.init()
+        self.init(self.args)
 
 
     # Send toSend with newline on end and get back response and second newline returning

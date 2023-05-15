@@ -11,11 +11,10 @@ pyximport.install()
 from typing import List, Tuple, Any
 
 from alphazero.Game import GameState
-from alphazero.envs.hex.hexBoard import Board, BLUE_PLAYER, RED_PLAYER, EMPTY, GREEN_PLAYER
+from alphazero.envs.hex.hexBoard import Board, BLUE_PLAYER, RED_PLAYER, EMPTY
 
 import numpy as np
-import torch
-from torch_geometric.data import Data
+
 
 NUM_PLAYERS             = 2
 #MULTI_PLANE_OBSERVATION = False
@@ -26,28 +25,8 @@ CHANNEL_DICT            = {"OnlyBoard" : 1, "BoardAndTurn" :2, "BasicOneHot" : 3
         "OneHotTurn" : 4, "OneHotTurnWithNeuroHexLayers" : 8,
         "OneHotTurnWithNeuroHexLayersCut":6,
         "OneHotTurnWithVirtualNeuroHexLayers" : 8}
-MODE                    = "OneHotTurnWithVirtualNeuroHexLayers"
-GRAPH = False
-NUM_CHANNELS            = CHANNEL_DICT.get(MODE)  + GRAPH
-EDGES = []
-if GRAPH:
-    for j in range(BOARD_SIZE+2):
-        for i in range(BOARD_SIZE+2):
-            me = i + (BOARD_SIZE+2)*j
-
-            for row in range(-1, 2):
-                for col in range(-1, 2):
-                    if row != col:
-                        i2    = i + row
-                        j2    = j + col
-                        them  = i2 + (BOARD_SIZE+2)*j2
-                        if i2>=0 and i2<BOARD_SIZE+2 and j2>=0 and j2<BOARD_SIZE+2:
-                            EDGES.append((me, them))
-    for i in range((BOARD_SIZE+2)*(BOARD_SIZE+2)):
-        EDGES.append((i ,(BOARD_SIZE+2)*(BOARD_SIZE+2)))
-        EDGES.append(((BOARD_SIZE+2)*(BOARD_SIZE+2), i))
-    EDGES = torch.transpose(torch.tensor(EDGES),0,1).to(int)
-
+MODE                    = "OneHotTurn"
+NUM_CHANNELS            = CHANNEL_DICT.get(MODE)
 
 # This determines weather we do the flip on the board when it's red's turn to make them
 #   appear the same
@@ -82,41 +61,25 @@ class Game(GameState):
 
     @staticmethod
     def has_draw() -> bool:
-        return False
+        return False    
 
     @staticmethod
     def num_players() -> int:
         return NUM_PLAYERS
 
-    @staticmethod
-    def get_edges() -> torch.tensor:
-        return EDGES
-
     # action == BOARD_SIZE*BOARD_SIZE means swap  
     @staticmethod
     def action_size() -> int:
-        if GRAPH:
-            return (BOARD_SIZE+2)*(BOARD_SIZE+2) + 1
-        else:
-            return (BOARD_SIZE)*(BOARD_SIZE) + 1
+        return BOARD_SIZE*BOARD_SIZE + 1
 
     @staticmethod
     def observation_size() -> Tuple[int, int, int]:
-        if not GRAPH:
-            return NUM_CHANNELS, OBSERVATION_BOARD_SIZE, OBSERVATION_BOARD_SIZE
-        else:
-            return NUM_CHANNELS, (BOARD_SIZE+2)*(BOARD_SIZE+2) + 1, EDGES.size()[1]
+        return NUM_CHANNELS, OBSERVATION_BOARD_SIZE, OBSERVATION_BOARD_SIZE
 
     def valid_moves(self):
-        if GRAPH:
-            ret = np.where(np.array(self._board.board) == 0, 1, 0)
-            if CANONICAL_STATE and self._player == 1:
-                ret = np.flipud(np.fliplr(np.transpose(np.reshape(ret, (BOARD_SIZE+2, BOARD_SIZE+2))))).ravel()
-        else:
-            ret = self._board.getPossibleMoves()
-            if CANONICAL_STATE and self._player == 1:
-                ret = np.flipud(np.fliplr(np.transpose(np.reshape(ret, (BOARD_SIZE, BOARD_SIZE))))).ravel()
-        
+        ret = self._board.getPossibleMoves()
+        if CANONICAL_STATE and self._player == 1:
+            ret = np.flipud(np.fliplr(np.transpose(np.reshape(ret, (BOARD_SIZE, BOARD_SIZE))))).ravel()
         return np.append(ret,(1 if (self._turns == 1 and SWAP_MOVE) else 0))
 
 
@@ -126,7 +89,8 @@ class Game(GameState):
         me = (BLUE_PLAYER, RED_PLAYER)[self.player]
         realAction = action
 
-        move = (self._board.SWAP, self._board.SWAP) if (action == self.action_size()-1) else (action % (BOARD_SIZE+2*GRAPH)-GRAPH, action// (BOARD_SIZE+2*GRAPH)-GRAPH) 
+        move = (self._board.SWAP, self._board.SWAP) if (action == BOARD_SIZE*BOARD_SIZE) else (action % BOARD_SIZE, action// BOARD_SIZE) 
+
         if me == RED_PLAYER and CANONICAL_STATE and move != (self._board.SWAP, self._board.SWAP):
             move = self._board.pairflipInXPlusYCorrection(move)
 
@@ -148,24 +112,6 @@ class Game(GameState):
     def observation(self):
         me = (BLUE_PLAYER, RED_PLAYER)[self.player]
         them = 3 - me
-
-        if GRAPH:
-            b      = np.reshape(self._board.board, ((BOARD_SIZE+2) * (BOARD_SIZE+2),1))
-
-            both   = np.where(b == GREEN_PLAYER, 1, 0)
-            blank  = np.where(b == 0, 1, 0)
-            blue   = np.where(b == BLUE_PLAYER, 1, 0)
-            red    = np.where(b == RED_PLAYER, 1, 0)
-
-            middle = np.zeros(((BOARD_SIZE+2) * (BOARD_SIZE+2),1))
-            middle[len(middle)//2] = 1
-
-            turns  = np.full(((BOARD_SIZE+2) * (BOARD_SIZE+2),1), self._player)
-
-            nodes = np.concatenate([blank,blue+both,red+both,middle,turns], -1)
-            nodes = np.concatenate([nodes,np.array([[0]*NUM_CHANNELS])]) 
-
-            return Data(torch.from_numpy(nodes), edge_index=EDGES)
 
         if MODE == "OnlyBoard":
             # We only get the basic board with default encoding i.e. blue as 1 red as 0
@@ -264,6 +210,7 @@ class Game(GameState):
                 return np.array([turns,blank,blues,reds, blueConnectedToLeft,
                     blueConnectedToRight, redConnectedToTop, redConnectedToBot])
 
+
         if MODE == "OneHotTurnWithNeuroHexLayersCut":
             # 0/1/2/3 Turn/Empty/BluePieces/RedPieces 
             # 4 Connected To Blue Left or Right
@@ -295,6 +242,7 @@ class Game(GameState):
                     np.delete(np.delete(redConnected, [0,-1],1),[0,-1],0)])
             else:
                 return np.array([turns,blank,blues,reds, blueConnected, redConnected])
+
 
         if MODE == "OneHotTurnWithVirtualNeuroHexLayers":
             # 0/1/2/3 Turn/Empty/BluePieces/RedPieces 
@@ -390,14 +338,12 @@ class Game(GameState):
         #           -------------
         #              A B C D E  
         ret = []
-        pi_board = np.reshape(pi[:-1], (BOARD_SIZE,BOARD_SIZE) if not GRAPH else ((BOARD_SIZE+2,BOARD_SIZE+2)))
+        pi_board = np.reshape(pi[:-1], (BOARD_SIZE,BOARD_SIZE))
         winningPlayer = 0 if (winstate[0] == 1) else 1
         for flipInXPlusY in [False, True]:
             for rotate in [False, True]:
                 # If we are viewing red and blue as the same then don't bother with 
                 #  sym 2 as it is already accounted for in the way the board is seen
-                if GRAPH and (rotate or flipInXPlusY):
-                    continue;
                 if CANONICAL_STATE and flipInXPlusY:
                     continue;
                 new_state    = self.clone()
