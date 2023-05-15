@@ -4,12 +4,29 @@ from alphazero.Game import GameState
 from alphazero.envs.tictactoe.TicTacToeLogic import Board
 
 import numpy as np
+import torch
+from torch_geometric.data import Data
 
 NUM_PLAYERS = 2
-NUM_CHANNELS = 1
+NUM_CHANNELS = 7
 BOARD_SIZE = 3
 ACTION_SIZE = BOARD_SIZE ** 2
-OBSERVATION_SIZE = (NUM_CHANNELS, BOARD_SIZE, BOARD_SIZE)
+GRAPH = True
+EDGES = []
+
+if GRAPH:
+    _dir  = [(1, 0), (0, -1), (-1, 0), (0, 1)]#[(1, 1), (1, 0), (1, -1), (0, -1), (-1, -1), (-1, 0), (-1, 1), (0, 1)]
+    n     = BOARD_SIZE
+    for j in range(n):
+        for i in range(n):
+            lst = [[(i+off[0], j+off[1]), (i+2*off[0], j+2*off[1]), (i-off[0], j-off[1])] for off in _dir]
+            #connectedTo = ([pairs[0] for pairs in lst if sum(map(lambda pair : all(0 <= _ < BOARD_SIZE for _ in pair), pairs)) >= 2])
+            connectedTo = ([pairs[0] for pairs in lst if all(0 <= _ < BOARD_SIZE for _ in pairs[0])])
+            EDGES += [(j*n+i, j2*n+i2)for (i2,j2) in connectedTo]
+
+    EDGES = torch.transpose(torch.tensor(EDGES),0,1).to(int)
+
+OBSERVATION_SIZE = (NUM_CHANNELS, ACTION_SIZE, len(EDGES[0])) if GRAPH else (NUM_CHANNELS, BOARD_SIZE, BOARD_SIZE)
 
 
 class Game(GameState):
@@ -44,8 +61,16 @@ class Game(GameState):
         return ACTION_SIZE
 
     @staticmethod
+    def has_draw() -> bool:
+        return True
+
+    @staticmethod
     def observation_size() -> Tuple[int, int, int]:
         return OBSERVATION_SIZE
+
+    @staticmethod
+    def get_edges() -> torch.Tensor:
+        return EDGES
 
     def _player_range(self):
         return (1, -1)[self.player]
@@ -78,7 +103,28 @@ class Game(GameState):
         return np.array(result, dtype=np.uint8)
 
     def observation(self):
-        return np.expand_dims(np.asarray(self._board.pieces), axis=0).astype(np.float32)
+        if not GRAPH:
+            return np.expand_dims(np.asarray(self._board.pieces), axis=0).astype(np.float32)
+        else:
+            nodes   = np.asarray(self._board.pieces).ravel() + 1
+            nodes   = np.eye(3)[nodes]
+            whoTurn = np.full((BOARD_SIZE**2,1), 2*self._player - 1)
+
+            zeroAway = np.array([[0],[0],[0],[0],[1],[0],[0],[0],[0]])
+            oneAway  = np.array([[0],[1],[0],[1],[0],[1],[0],[1],[0]])
+            twoAway  = np.array([[1],[0],[1],[0],[0],[0],[1],[0],[1]])
+
+            #middle  = np.zeros((BOARD_SIZE**2,1))
+            #middle[len(middle)//2] = 1
+            #middle[0], middle[2],middle[6],middle[8] = -1,-1,-1,-1
+            nodes   = np.concatenate((nodes,whoTurn, zeroAway,oneAway,twoAway), -1)
+            #print(nodes)
+            
+            ret = Data(torch.from_numpy(nodes), edge_index=EDGES)#.view(-1,1), edge_index=EDGES)
+            #print(ret)
+            return ret
+
+
 
     def symmetries(self, pi: np.ndarray, winstate) -> List[Tuple[Any, int]]:
         # mirror, rotational
@@ -102,7 +148,8 @@ class Game(GameState):
         return result
 
 
-def display(board):
+def display(game, action=None):
+    board = np.array(game._board.pieces)
     n = board.shape[0]
 
     print("   ", end="")
