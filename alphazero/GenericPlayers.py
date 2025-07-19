@@ -207,6 +207,7 @@ class MCTSPlayer(BasePlayer):
         return action
 
     def process(self, *args, **kwargs):
+        #print(args[0])
         return self.nn.process(*args, **kwargs)
 
 

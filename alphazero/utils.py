@@ -39,7 +39,7 @@ def const_temp_scaling(temp, *args, **kwargs) -> float:
     return temp
 
 
-def get_game_results(numberOfCompetingNets, result_queue, game_cls, _get_index=None):
+def get_game_results(numberOfCompetingNets, result_queue, game_cls, _get_index=None, save_event=None):
 
     num_games = result_queue.qsize()
     wins = np.zeros([numberOfCompetingNets] * game_cls.num_players() + [game_cls.num_players()])
@@ -49,8 +49,14 @@ def get_game_results(numberOfCompetingNets, result_queue, game_cls, _get_index=N
     selfWins  = np.zeros([numberOfCompetingNets, game_cls.num_players(), game_cls.num_players()])
     selfDraws = np.zeros([numberOfCompetingNets, game_cls.num_players()])
 
+    err_count = 0
+
     for _ in range(num_games):
-        state, winstate, agent_id, players = result_queue.get()
+        try:
+            state, winstate, agent_id, players = result_queue.get()
+        except:
+            err_count += 1
+            continue
         players = tuple(players)
         game_len_sum += state.turns
 
@@ -76,6 +82,8 @@ def get_game_results(numberOfCompetingNets, result_queue, game_cls, _get_index=N
                         index = _get_index(player, agent_id) if _get_index else player
                         wins[players][index] += 1
 
+    #save_event.set()
+    #print(f"err_count: {err_count} / total games: {num_games}")
     return wins, draws, game_len_sum / num_games if num_games else game_len_sum, selfWins, selfDraws
 
 
@@ -117,3 +125,26 @@ def convert_checkpoint_file(filepath: str, game_cls, args: dotdict, overwrite_ar
 
 def map_value(value, in_min, in_max, out_min, out_max):
     return (value - in_min) * (out_max - out_min) / (in_max - in_min) + out_min
+
+import re
+import hgtk
+
+def dueum(letter):
+    try:
+        dec = hgtk.letter.decompose(letter)
+    except:
+        print("이상한 글자:", letter)
+        return letter
+    #제10항  한자음 ‘녀, 뇨, 뉴, 니’가 단어 첫머리에 올 적에는 두음 법칙에 따라 ‘여, 요, 유, 이’로 적는다
+    if dec[0] == 'ㄴ' and dec[1] in ['ㅕ', 'ㅛ', 'ㅠ', 'ㅣ']:
+        letter = hgtk.letter.compose('ㅇ', dec[1], dec[2])
+
+    #제11항 한자음 ‘랴, 려, 례, 료, 류, 리’가 단어의 첫머리에 올 적에는 두음 법칙에 따라 ‘야, 여, 예, 요, 유, 이’로 적는다.
+    elif dec[0] == 'ㄹ' and dec[1] in ['ㅑ', 'ㅕ', 'ㅖ', 'ㅛ', 'ㅠ', 'ㅣ']:
+        letter = hgtk.letter.compose('ㅇ', dec[1], dec[2])
+
+    #제12항  한자음 ‘라, 래, 로, 뢰, 루, 르’가 단어의 첫머리에 올 적에는 두음 법칙에 따라 ‘나, 내, 노, 뇌, 누, 느’로 적는다.
+    elif dec[0] == 'ㄹ' and dec[1] in ['ㅏ', 'ㅐ', 'ㅗ', 'ㅚ', 'ㅜ', 'ㅡ']:
+        letter = hgtk.letter.compose('ㄴ', dec[1], dec[2])
+    
+    return letter

@@ -9,6 +9,8 @@ from alphazero.GenericPlayers import RawMCTSPlayer, NNPlayer, MCTSPlayer
 from alphazero.pytorch_classification.utils import Bar, AverageMeter
 
 from torch import multiprocessing as mp
+#if __name__ == '__main__':
+#    mp.set_start_method('spawn')
 from torch.utils.data import TensorDataset, ConcatDataset, DataLoader
 from torch_geometric.data import Data, Batch
 from tensorboardX import SummaryWriter
@@ -361,7 +363,9 @@ class Coach:
         self.model_iter = self.args.startIter
         self.agents = []
         self.input_tensors = []
-        self.input_tensors2 = []
+        self.input_tensors2 = [] #edge index
+        self.input_tensors3 = [] #edge weight
+        self.input_tensors4 = [] #edge attr
         self.input_queues = []
         self.policy_tensors = []
         self.value_tensors = []
@@ -450,20 +454,25 @@ class Coach:
 
                     for i in range(self.args.workers):
                         self.games_for_agent.append(self.gamesFor(i, self.args.workers, self.args.modeOfAssigningWork, selfPlay))
-                        print(self.games_for_agent[i])
+                        #print(self.games_for_agent[i])
                     
 
                     if selfPlay != None:
                         self.args.gamesPerIteration = sum([num*len(listOfGames) for num,listOfGames in self.games_for_agent])
+
+                    print(f'agent generate되기 시작')
                     self.generateSelfPlayAgents(exact = (reset != None))
-    
+                    
+                    print(f'selfplay processing 시작')
                     self.processSelfPlayBatches(self.model_iter)
                     if self.stop_train.is_set():
                         break
                     sleep(2)
+                    print(f'processing 저장 시작')
                     self.saveIterationSamples(self.model_iter)
                     if self.stop_train.is_set():
                         break
+                    print(f'게임 결과 processing 시작')
                     dat = self.processGameResults(self.model_iter)
                     
                     if reset != None:
@@ -471,6 +480,7 @@ class Coach:
 
                     if self.stop_train.is_set():
                         break
+                    print(f'작업 종료, kill 시작')
                     self.killSelfPlayAgents()
                     if self.stop_train.is_set():
                         break
@@ -478,6 +488,7 @@ class Coach:
                     if self.args.withPopulation and ((self.model_iter - 1) %self.args.roundRobinFreq == 0):
                         self.roundRobin(self.model_iter-1, dat[0], dat[1], dat[2])
 
+                print("train 시작")
                 self.train(self.model_iter)
                 if self.stop_train.is_set():
                     break
@@ -566,16 +577,17 @@ class Coach:
     @_set_state(TrainState.INIT_AGENTS)
     def generateSelfPlayAgents(self, exact = False):
         self.stop_agents = mp.Event()
+        self.save_event = mp.Event()
         self.ready_queue = mp.Queue()
         for i in range(self.args.workers):
-            if self.args.nnet_type != "graphnet":
+            if self.args.nnet_type == "resnet":
                 self.input_tensors.append(torch.zeros(
                     [self.args.process_batch_size, *self.game_cls.observation_size()]
                 ))
                 self.input_tensors[i].share_memory_()
                 if self.args.cuda:
                     self.input_tensors[i].pin_memory()
-            else:
+            elif self.args.nnet_type == "graphnet":
                 obs_size = self.game_cls.observation_size()
                 self.input_tensors.append(torch.zeros(
                     [self.args.process_batch_size, obs_size[1], obs_size[0]]
@@ -591,7 +603,42 @@ class Coach:
                 self.input_tensors2[i].share_memory_()
                 if self.args.cuda:
                     self.input_tensors2[i].pin_memory()
-            
+            elif self.args.nnet_type == "custom_graphmodel1":
+                obs_size = self.game_cls.observation_size()
+                self.input_tensors.append(torch.zeros(
+                    [self.args.process_batch_size, obs_size[4], obs_size[0]]
+                ))
+
+                
+                self.input_tensors[i].share_memory_()
+                if self.args.cuda:
+                    self.input_tensors[i].pin_memory()
+
+                #edge_index
+                self.input_tensors2.append(torch.zeros(
+                    [self.args.process_batch_size, 2, obs_size[2]], dtype=int
+                ))
+                self.input_tensors2[i].share_memory_()
+                if self.args.cuda:
+                    self.input_tensors2[i].pin_memory()
+
+                #edge_weight
+                self.input_tensors3.append(torch.zeros(
+                    [self.args.process_batch_size, obs_size[2]], dtype=int
+                ))
+                self.input_tensors3[i].share_memory_()
+                if self.args.cuda:
+                    self.input_tensors3[i].pin_memory()
+
+                #edge_attr
+                self.input_tensors4.append(torch.zeros(
+                    [self.args.process_batch_size, obs_size[2], obs_size[3]], dtype=int
+                ))
+                self.input_tensors4[i].share_memory_()
+                if self.args.cuda:
+                    self.input_tensors4[i].pin_memory()
+                
+
             self.input_queues.append(mp.Queue())
 
             self.policy_tensors.append(torch.zeros(
@@ -613,8 +660,12 @@ class Coach:
             self.agents.append(
                 SelfPlayAgent(i, self.games_for_agent[i], self.game_cls, self.ready_queue, self.batch_ready[i],
                               self.input_tensors[i], self.policy_tensors[i], self.value_tensors[i], self.file_queue,
-                              self.result_queue, self.completed, self.games_played, self.stop_agents, self.pause_train,
-                              self.args, self.input_tensors2[i] if self.args.nnet_type == "graphnet" else None, _is_arena=False,  _is_warmup=self.warmup, _exact_game_count=exact)
+                              self.result_queue, self.completed, self.games_played, self.stop_agents, self.save_event, self.pause_train,
+                              self.args, 
+                              self.input_tensors2[i] if self.args.nnet_type != "resnet" else None, #edge_index
+                              self.input_tensors3[i] if self.args.nnet_type == "custom_graphmodel1" else None, #edge_weight 
+                              self.input_tensors4[i] if self.args.nnet_type == "custom_graphmodel1" else None, #edge_attr
+                              _is_arena=False,  _is_warmup=self.warmup, _exact_game_count=exact)
             )
             self.agents[i].daemon = True
 
@@ -639,26 +690,39 @@ class Coach:
 
             try:
                 id, netsNumsList = self.ready_queue.get(timeout=1)
+                #print(f"Processing batch from worker {id}. Completed so far: {self.completed.value}")
                 #indexToNet = self.games_for_agent[id][1]
                 #if id == 0:
                 #    print(netsNumsList)
                 #print(id)
                 #'print(self.input_queues)
                 cumulative = 0
-                if self.args.nnet_type != "graphnet":
+                if self.args.nnet_type == "resnet":
                     input_tensor = self.input_tensors[id]#self.input_queues[id].get()
-                else :
+                elif self.args.nnet_type == "graphnet" :
                     input_x = self.input_tensors[id]
                     input_edge = self.input_tensors2[id]
+                elif self.args.nnet_type == "custom_graphmodel1":
+                    input_x = self.input_tensors[id]
+                    input_edge_index = self.input_tensors2[id]
+                    input_edge_weight = self.input_tensors3[id]
+                    input_edge_attr = self.input_tensors4[id]
+
+
                 #print(input_tensor)
                 for net, number in netsNumsList:
                     if number == 0:
                         continue;
-                    if self.args.nnet_type != "graphnet":
+                    if self.args.nnet_type == "resnet":
                         to_process = input_tensor[cumulative:cumulative+number]
-                    else:
+                    elif self.args.nnet_type == "graphnet":
                         to_process = Data(torch.cat([*input_x[cumulative:cumulative+number]]), 
                                         torch.cat([*input_edge[cumulative:cumulative+number]],-1))
+                    elif self.args.nnet_type == "custom_graphmodel1":
+                        to_process = Data(torch.cat([*input_x[cumulative:cumulative+number]]), 
+                                        torch.cat([*input_edge_index[cumulative:cumulative+number]],-1),
+                                        torch.cat([*input_edge_weight[cumulative:cumulative+number]]),
+                                        torch.cat([*input_edge_attr[cumulative:cumulative+number]])) #[n,1]끼리 concat해서 [2n,1]
 
                     policy, value = nnets[net].process(to_process, batch_size=number)
                     self.policy_tensors[id][cumulative: cumulative + number].copy_(policy)
@@ -667,6 +731,7 @@ class Coach:
                 
                 self.batch_ready[id].set()
             except Empty:
+                #print("empty")
                 pass
 
             size = self.games_played.value
@@ -690,42 +755,67 @@ class Coach:
     def saveIterationSamples(self, iteration):
         num_samples = self.file_queue.qsize()
         print(f'Saving {num_samples} samples')
-        if self.args.nnet_type != "graphnet":
+        if self.args.nnet_type == "resnet":
             data_tensor = torch.zeros([num_samples, *self.game_cls.observation_size()])
-        else:
+        elif self.args.nnet_type == "graphnet":
             obs_size = self.game_cls.observation_size()
             x_tensor    = torch.zeros([num_samples, obs_size[1], obs_size[0]])
             edge_tensor = torch.zeros([num_samples, 2, obs_size[2]])
+        elif self.args.nnet_type == "custom_graphmodel1":
+            obs_size = self.game_cls.observation_size()
+            x_tensor = torch.zeros([num_samples, obs_size[4], obs_size[0]])
+            edge_index_tensor = torch.zeros([num_samples, 2, obs_size[2]])
+            edge_weight_tensor = torch.zeros([num_samples, obs_size[2]])
+            edge_attr_tensor = torch.zeros([num_samples, obs_size[2], obs_size[3]])
         
         policy_tensor = torch.zeros([num_samples, self.game_cls.action_size()])
         value_tensor = torch.zeros([num_samples, self.game_cls.num_players() + self.game_cls.has_draw()])
         for i in range(num_samples):
             #print(i)
-            data, policy, value = self.file_queue.get() 
             
-            if self.args.nnet_type != "graphnet":
+            data, policy, value = self.file_queue.get()
+            
+            if self.args.nnet_type == "resnet":
                 data_tensor[i] = torch.from_numpy(data)
-            else:
+            elif self.args.nnet_type == "graphnet":
                 x_tensor[i]    = data.x
                 if not self.args.constant_edges:
                     edge_tensor[i] = data.edge_index
+            elif self.args.nnet_type == "custom_graphmodel1":
+                x_tensor[i]    = data.x
+                edge_index_tensor[i] = data.edge_index
+                edge_weight_tensor[i] = data.edge_weight
+                edge_attr_tensor[i] = data.edge_attr
             policy_tensor[i] = torch.from_numpy(policy)
             value_tensor[i] = torch.from_numpy(value)
 
+        self.wins, self.draws, self.numAvgGameLength, self.self_wins, self.self_draws = get_game_results(self.numNets, self.result_queue, self.game_cls)
+
+
+        self.save_event.set() 
         folder = os.path.join(self.args.data, self.args.run_name)
         filename = os.path.join(folder, get_iter_file(iteration).replace('.pkl', ''))
         if not os.path.exists(folder): os.makedirs(folder)
 
-        if self.args.nnet_type != "graphnet":
+        if self.args.nnet_type == "resnet":
             torch.save(data_tensor, filename + '-data.pkl', pickle_protocol=pickle.HIGHEST_PROTOCOL)
             del data_tensor
-        else:
+        elif self.args.nnet_type == "graphnet":
             torch.save(x_tensor, filename + '-xdata.pkl', pickle_protocol=pickle.HIGHEST_PROTOCOL)
             if not self.args.constant_edges:
                 torch.save(edge_tensor, filename + '-edgedata.pkl', pickle_protocol=pickle.HIGHEST_PROTOCOL)
             del x_tensor
             del edge_tensor
+        elif self.args.nnet_type == "custom_graphmodel1":
+            torch.save(x_tensor, filename + '-xdata.pkl', pickle_protocol=pickle.HIGHEST_PROTOCOL)
+            torch.save(edge_index_tensor, filename + '-edge_indexdata.pkl', pickle_protocol=pickle.HIGHEST_PROTOCOL)
+            torch.save(edge_weight_tensor, filename + '-edge_weightdata.pkl', pickle_protocol=pickle.HIGHEST_PROTOCOL)
+            torch.save(edge_attr_tensor, filename + '-edge_attrdata.pkl', pickle_protocol=pickle.HIGHEST_PROTOCOL)
 
+            del x_tensor
+            del edge_index_tensor
+            del edge_weight_tensor
+            del edge_attr_tensor
 
         torch.save(policy_tensor, filename + '-policy.pkl', pickle_protocol=pickle.HIGHEST_PROTOCOL)
         torch.save(value_tensor, filename + '-value.pkl', pickle_protocol=pickle.HIGHEST_PROTOCOL)
@@ -734,7 +824,8 @@ class Coach:
 
     @_set_state(TrainState.PROCESS_RESULTS)
     def processGameResults(self, iteration):
-        wins, draws, numAvgGameLength, self_wins, self_draws = get_game_results(self.numNets, self.result_queue, self.game_cls)
+        #wins, draws, numAvgGameLength, self_wins, self_draws = get_game_results(self.numNets, self.result_queue, self.game_cls)
+        wins, draws, numAvgGameLength, self_wins, self_draws = self.wins, self.draws, self.numAvgGameLength, self.self_wins, self.self_draws
 
         numWins        = np.sum(wins, axis = tuple(range(len(wins.shape) - 1)))
         numDraws       = np.sum(draws)
@@ -838,27 +929,37 @@ class Coach:
             )
             
             try:
-                if self.args.nnet_type != "graphnet":
+                if self.args.nnet_type == "resnet":
                     data_tensor = torch.load(filename + '-data.pkl')
-                else:
+                elif self.args.nnet_type == "graphnet":
                     x_tensor    = torch.load(filename + '-xdata.pkl')
                     if not self.args.constant_edges:
                         edge_tensor = torch.load(filename + '-edgedata.pkl').to(int)
                     else:
                         edge_tensor = self.game_cls.get_edges().expand(x_tensor.size(0), 2, self.game_cls.observation_size()[2])
+                elif self.args.nnet_type == "custom_graphmodel1":
+                    x_tensor    = torch.load(filename + '-xdata.pkl')
+                    edge_index_tensors = torch.load(filename + '-edge_indexdata.pkl')
+                    edge_weight_tensors = torch.load(filename + '-edge_weightdata.pkl')
+                    edge_attr_tensors = torch.load(filename + '-edge_attrdata.pkl')
                 policy_tensor = torch.load(filename + '-policy.pkl')
                 value_tensor = torch.load(filename + '-value.pkl')
             except FileNotFoundError as e:
                 print('Warning: could not find tensor data. ' + str(e))
                 return
-            if self.args.nnet_type != "graphnet":
+            if self.args.nnet_type == "resnet":
                 tensor_dataset_list.append(
                     TensorDataset(data_tensor, policy_tensor, value_tensor)
                 )
-            else:
+            elif self.args.nnet_type == "graphnet":
                 tensor_dataset_list.append(
                     TensorDataset(x_tensor, edge_tensor, policy_tensor, value_tensor)
                 )
+            elif self.args.nnet_type == "custom_graphmodel1":
+                tensor_dataset_list.append(
+                    TensorDataset(x_tensor, edge_index_tensors, edge_weight_tensors, edge_attr_tensors, policy_tensor, value_tensor)
+                )
+
             nonlocal num_train_steps
             if self.args.averageTrainSteps:
                 nonlocal sample_counter
@@ -870,7 +971,9 @@ class Coach:
         def train_data(tensor_dataset_list, train_on_all=False):
             dataset = ConcatDataset(tensor_dataset_list)
             dataloader = DataLoader(dataset, batch_size=self.args.train_batch_size, shuffle=True,
-                                    num_workers=self.args.workers, pin_memory=True)
+                                    num_workers=0, pin_memory=True) #num_workers를 좀 늘려볼 순 있을 듯 (메모리 문제 때문에 0으로 해놓음)
+            #dataloader = DataLoader(dataset, batch_size=self.args.train_batch_size, shuffle=True,
+            #                        num_workers=self.args.worker, pin_memory=True)
             if self.args.averageTrainSteps:
                 nonlocal num_train_steps
                 num_train_steps //= sample_counter
@@ -951,14 +1054,14 @@ class Coach:
             os.makedirs("elo/"+self.args.run_name)
         networks = sorted(glob(self.args.checkpoint + '/' + self.args.run_name + '/*'))
         if self.model_iter == 1:
-            np.savetxt('elo/'+self.args.run_name+'/' + 'ELOS.csv', [[0]], delimiter=",")
+            np.savetxt('elo/'+self.args.run_name+'/' + 'ELOS.csv', [[1000]], delimiter=",")
 
         elos = np.loadtxt('elo/'+self.args.run_name+'/' + 'ELOS.csv', delimiter=',')
         elos = [elos]
         elos = np.array(elos).flatten()
         # print(elos)
         # current_elo = elos[len(elos)-1]
-        current_elo = 0
+        current_elo = 1000
 
         sf_args = self.args.copy()
         sf_args.numMCTSSims = self.args.eloMCTS
@@ -996,13 +1099,15 @@ class Coach:
             wins, draws, winrates = self.arena.play_games(self.args.eloGames, verbose=False)
 
             expected_score = 1/(1+10**( (opponent_elo-current_elo)/400 ))
-            actual_score = (wins[0] + 0.5*draws)#/(wins[0]+wins[1]+draws)
-            running_expectation += 10*expected_score
-            running_score += actual_score
+            actual_score = (wins[0] + 0.5*draws)/self.args.eloGames
+            current_elo = current_elo + 32 * self.args.eloGames * (actual_score-expected_score)
+            #actual_score = (wins[0] + 0.5*draws)#/(wins[0]+wins[1]+draws)
+            #running_expectation += 10*expected_score
+            #running_score += actual_score
             #current_elo = current_elo + 32*(actual_score - 10*expected_score)
 
-        current_elo = current_elo + 32*(running_score - running_expectation)
-        current_elo = max(current_elo, 0)
+        #current_elo = current_elo + 32*(running_score - running_expectation)
+        #current_elo = max(current_elo, 0)
         elos = np.append(elos, current_elo)
         np.savetxt('elo/'+self.args.run_name+'/' + 'ELOS.csv', [elos], delimiter=",")
         print(f'Self play ELO : {current_elo}')

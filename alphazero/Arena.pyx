@@ -15,7 +15,8 @@ import torch
 import random
 import time
 from torch_geometric.data import Batch
-
+import pandas as pd
+from alphazero.envs.wordchain.WordChainPlayers import HumanWordChainPlayer
 
 class _PlayerStats:
     def __init__(self, index):
@@ -137,7 +138,7 @@ class Arena:
         return [s.winrate for s in self.__player_stats]
 
     @_set_state(ArenaState.SINGLE_GAME)
-    def play_game(self, verbose=False, _player_to_index: List[int] = None) -> Tuple[GameState, np.ndarray]:
+    def play_game(self, verbose=False, _player_to_index: List[int] = None, valid_data: pd.DataFrame = None) -> Tuple[GameState, np.ndarray]:
         """
         Executes one episode of a game.
 
@@ -158,8 +159,10 @@ class Arena:
         while not self.stop_event.is_set():
             while self.pause_event.is_set():
                 time.sleep(.1)
-
-            action = self.players[player_to_index[self.game_state.player]](self.game_state)
+            if self.players[player_to_index[self.game_state.player]].__class__ == HumanWordChainPlayer:
+                action = self.players[player_to_index[self.game_state.player]](self.game_state, valid_data)
+            else:
+                action = self.players[player_to_index[self.game_state.player]](self.game_state)
             if self.stop_event.is_set(): #or not isinstance(action, int):
                 break
 
@@ -170,10 +173,16 @@ class Arena:
                 print(f'Turn {self.game_state.turns}, Player {self.game_state.player}')
 
             [p.update(self.game_state, action) for p in self.players]
+
+            if verbose: #끝말잇기만 여기에서 출력
+                #print(self.game_state._board.head)
+                self.display(self.game_state, action)
+            
             self.game_state.play_action(action)
 
-            if verbose:
-                self.display(self.game_state, action)
+            #if verbose:
+            #    #print(self.game_state._board.head)
+            #    self.display(self.game_state, action)
             
             winstate = self.game_state.win_state()
 
@@ -187,7 +196,7 @@ class Arena:
         return self.game_state, self.game_state.win_state()
 
     @_set_state(ArenaState.PLAY_GAMES)
-    def play_games(self, num: int, verbose=False, shuffle_players=True) -> Tuple[List[int], int, List[float]]:
+    def play_games(self, num: int, verbose=False, shuffle_players=True, valid_data: pd.DataFrame = None) -> Tuple[List[int], int, List[float]]:
         """
         Plays num games in which the order of the players
         is randomized for each game. The order is simply switched
@@ -225,6 +234,7 @@ class Arena:
             batch_queues = []
             self.stop_event = mp.Event()
             self.pause_event = mp.Event()
+            self.save_event = mp.Event() #won'tbe used
             ready_queue = mp.Queue()
             result_queue = mp.Queue()
             completed = mp.Value('i', 0)
@@ -252,7 +262,7 @@ class Arena:
                     value_tensors[i].pin_memory()
 
                 self._agents.append(
-                    SelfPlayAgent(i, (100000000, [(0,0)]), self.game_cls, ready_queue, batch_ready[i], batch_queues[i], policy_tensors[i], value_tensors[i], batch_queues[i], result_queue, completed, games_played, self.stop_event, self.pause_event, self.args, _is_arena=True))
+                    SelfPlayAgent(i, (100000000, [(0,0)]), self.game_cls, ready_queue, batch_ready[i], batch_queues[i], policy_tensors[i], value_tensors[i], batch_queues[i], result_queue, completed, games_played, self.stop_event, self.save_event, self.pause_event, self.args, _is_arena=True))
                 self._agents[i].daemon = True
                 self._agents[i].start()
 
@@ -273,8 +283,13 @@ class Arena:
                             continue;
                         #if not isinstance(batch, list):
                         batch_size = None
-                        if self.args.nnet_type == "graphnet":
+                        if self.args.nnet_type in ["graphnet", "custom_graphmodel1"]:
                             batch_size = len(batch)
+                            #print("aaaaaaaa")
+                            #import joblib
+                            #joblib.dump(batch, "alphazero/tmp/whathappened.pkl")
+                            #for i in range(batch_size):
+                            #    batch[i].x = torch.from_numpy(batch[i].x)
                             batch = Batch.from_data_list(batch)
 
                         p, v = (self.players[player]).process(batch, batch_size=batch_size)
@@ -364,10 +379,15 @@ class Arena:
 
                 # Bookkeeping + plot progress
                 for player, is_win in enumerate(winstate):
-                    if is_win:
-                        if player == len(winstate) - 1:
-                            self.draws += 1
-                        else:
+                     #fixed wrong implementation
+                    if self.game_cls.has_draw():
+                        if is_win:
+                            if player == len(winstate) - 1:
+                                self.draws += 1
+                            else:
+                                self.__player_stats[players[player]].add_win()
+                    else:
+                        if is_win:
                             self.__player_stats[players[player]].add_win()
 
                 self.__update_winrates()

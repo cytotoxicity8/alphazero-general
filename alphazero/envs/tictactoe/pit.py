@@ -41,7 +41,7 @@ if __name__ == '__main__':
     nn1 = NNet(Game, args)
     #print(nn1)
 
-    nn1.load_checkpoint(folder='./checkpoint/tictacgraph_5_noDropout', 
+    nn1.load_checkpoint(folder='./checkpoint/tictacgraph_5_noDropout_norm_deeper_DFS_batch', 
                         filename=f'00-iteration-0002.pkl')
 
     nn2 = nn1
@@ -53,7 +53,8 @@ if __name__ == '__main__':
 
     arena = Arena(players, Game, use_batched_mcts=False, args=args, display=display)
 
-    wins, draws, winrates = arena.play_games(128)#, verbose=True)
+    #wins, draws, winrates = arena.play_games(128)#, verbose=True)
+    wins, draws, winrates = arena.play_game(verbose=True)
 
     for i in range(len(wins)):
         print(f'player{i+1}:\n\twins: {wins[i]}\n\twin rate: {winrates[i]}')

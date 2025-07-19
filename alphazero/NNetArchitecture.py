@@ -7,6 +7,7 @@ import torch_geometric as geo_torch
 from alphazero.Game import GameState
 from alphazero.utils import dotdict
 import numpy as np
+from torch_geometric.data import Data
 
 # 1x1 convolution
 def conv1x1(in_channels, out_channels, stride=1):
@@ -209,11 +210,12 @@ class GraphNet(nn.Module):
             activation=nn.Identity
         )
         self.v_mean = geo_nn.pool.global_mean_pool
+        
 
         self.pi_fc = mlp(
             args.policy_head_channels,
             args.policy_dense_layers,
-            1,
+            1, #원래 1인데 두음법칙 고려해서
             activation=nn.Identity
         )
 
@@ -237,8 +239,186 @@ class GraphNet(nn.Module):
         x = self.LinearLayer(x)
 
         v = self.v_fc(x)
-        v = self.v_mean(v, batch=None)
+        v = self.v_mean(v, batch=None) #head 취할 수 있을 듯
         v = v.view(batch_size, -1)
+
+        pi = self.pi_fc(x)
+        pi = pi.view(batch_size, -1)
+
+        
+        #print(v.shape, pi.shape)
+
+        return F.log_softmax(pi/self.pst, dim=1), F.log_softmax(v/self.vst, dim=1)
+    
+class CustomGraphModel1(nn.Module):
+    def __init__(self, game_cls: GameState, args: dotdict):
+        super(CustomGraphModel1, self).__init__()
+        assert args.depth > 0, "Can't make Graph Neural Network with 0 or less layers"
+        assert args.value_head_channels == args.policy_head_channels
+        
+
+        self.channels        = game_cls.observation_size()[0]
+        self.vst             = args.value_softmax_temperature
+        self.pst             = args.policy_softmax_temperature
+        self.gnn_type        = args.gnn_type
+        self.use_head_embed  = args.use_head_embed
+
+        # GIN(in_channels: int, hidden_channels: int, num_layers: int, 
+        #    out_channels: Optional[int] = None, dropout: float = 0.0, 
+        #    act: Optional[Union[str, Callable]] = 'relu', act_first: bool = False, 
+        #    act_kwargs: Optional[Dict[str, Any]] = None, norm: Optional[Union[str, Callable]] = None, 
+        #    norm_kwargs: Optional[Dict[str, Any]] = None, jk: Optional[str] = None, **kwargs
+        # This is all the way up to 
+        norm = geo_torch.nn.norm.BatchNorm(args.num_channels)
+
+        if args.gnn_type == "GAT":
+            self.GNNLayer  = geo_nn.GAT(self.channels, args.num_channels, args.depth, v2=True,
+                out_channels = args.depth*args.num_channels, jk = "cat", norm = norm, edge_dim=1)
+        elif args.gnn_type == "GIN": #edge 정보 못 쓰므로 사용X
+            self.GNNLayer  = geo_nn.GIN(self.channels, args.num_channels, args.depth, 
+                out_channels = args.depth*args.num_channels, jk = "cat", norm = norm)
+        
+        self.CatLayers = geo_nn.JumpingKnowledge("cat")
+        # This is the layer directly before the FC-v and FC-pi layers
+        self.LinearLayer = mlp(self.channels + args.depth*args.num_channels, #jumping knowledge 고려
+            args.middle_layers, args.policy_head_channels, activation=nn.ReLU, dropout=None,
+            batchnorm=True)
+
+        self.v_fc = mlp(
+            args.value_head_channels,
+            args.value_dense_layers,
+            game_cls.num_players() + game_cls.has_draw(),
+            activation=nn.Identity
+        )
+        self.v_mean = geo_nn.pool.global_mean_pool
+        """
+        self.v_fc2 = mlp(
+            self.channels,
+            [],
+            1,
+            activation = nn.Sigmoid
+        )
+        """
+
+        self.pi_fc = mlp(
+            args.policy_head_channels,
+            args.policy_dense_layers,
+            2, #원래 1인데 두음법칙 고려해서
+            activation=nn.Identity
+        )
+
+    # Takes a torch_geometric.data.Data Object
+    # if it is a batch must be given as a torch_geometric.data.Batch
+    def forward(self, data: Data, batch_size):
+        #print(x)
+        #print(edge_index)
+        if self.gnn_type == "GAT":
+            x = self.GNNLayer(data.x, data.edge_index.to(torch.long), edge_attr=data.edge_attr.view(-1,1))
+        elif self.gnn_type == "GIN":
+            x = self.GNNLayer(data.x, data.edge_index)
+        x = self.CatLayers([data.x,x])
+        #if batch_size == 1:
+        #    print(x)
+        # If batching reshape x so that the the different graphs are seperate
+        x_size = list(x.size())
+        assert x_size[0] % batch_size == 0, f"Something has gone very wrong with batching {batch_size} graphs were inputed but the output contained a number of nodes that was not divisible by that; could be caused by inputing graphs of different sizes"
+        x = x.view(*([batch_size, x_size[0]//batch_size]+x_size[1:]))
+
+        #print(x.size())
+
+        x = self.LinearLayer(x)
+
+        
+        if not self.use_head_embed:
+            v = self.v_fc(x)
+            v = self.v_mean(v, batch=None) #head 취할 수 있을 듯
+            v = v.view(batch_size, -1)
+        else:
+            head_dim = data.x.shape[1] - 2
+            head_indicies = data.x.reshape(batch_size, -1, self.channels)[:, :, head_dim].detach().cpu().nonzero(as_tuple=True)
+            v = self.v_fc(x[head_indicies]) #head에 해당하는 애들만 v에 태우고 (head 수는 기본적으로 하나이나 root에선 모두가 head)
+            v = self.v_mean(v, batch=head_indicies[0].cuda()) #걔들 평균
+            #v = v.view(batch_size, -1)
+
+        
+
+        pi = self.pi_fc(x)
+        pi = pi.view(batch_size, -1)
+
+        return F.log_softmax(pi/self.pst, dim=1), F.log_softmax(v/self.vst, dim=1)
+    
+class CustomGraphModel2(nn.Module):
+    def __init__(self, game_cls: GameState, args: dotdict):
+        super(CustomGraphModel1, self).__init__()
+        assert args.depth > 0, "Can't make Graph Neural Network with 0 or less layers"
+        assert args.value_head_channels == args.policy_head_channels
+        
+
+        self.channels        = game_cls.observation_size()[0]
+        self.vst             = args.value_softmax_temperature
+        self.pst             = args.policy_softmax_temperature
+        self.gnn_type        = args.gnn_type
+
+        # GIN(in_channels: int, hidden_channels: int, num_layers: int, 
+        #    out_channels: Optional[int] = None, dropout: float = 0.0, 
+        #    act: Optional[Union[str, Callable]] = 'relu', act_first: bool = False, 
+        #    act_kwargs: Optional[Dict[str, Any]] = None, norm: Optional[Union[str, Callable]] = None, 
+        #    norm_kwargs: Optional[Dict[str, Any]] = None, jk: Optional[str] = None, **kwargs
+        # This is all the way up to 
+        norm = geo_torch.nn.norm.BatchNorm(args.num_channels)
+
+        if args.gnn_type == "GAT":
+            self.GNNLayer  = geo_nn.GAT(self.channels, args.num_channels, args.depth, v2=True,
+                out_channels = args.depth*args.num_channels, jk = "cat", norm = norm, edge_dim=1)
+        elif args.gnn_type == "GIN": #edge 정보 못 쓰므로 사용X
+            self.GNNLayer  = geo_nn.GIN(self.channels, args.num_channels, args.depth, 
+                out_channels = args.depth*args.num_channels, jk = "cat", norm = norm)
+        
+        self.CatLayers = geo_nn.JumpingKnowledge("cat")
+        # This is the layer directly before the FC-v and FC-pi layers
+        self.LinearLayer = mlp(self.channels + args.depth*args.num_channels, #jumping knowledge 고려
+            args.middle_layers, args.policy_head_channels, activation=nn.ReLU, dropout=None,
+            batchnorm=True)
+
+        self.v_fc = mlp(
+            args.value_head_channels,
+            args.value_dense_layers,
+            game_cls.num_players() + game_cls.has_draw(),
+            activation=nn.Identity
+        )
+        self.v_mean = geo_nn.pool.global_mean_pool
+
+        self.pi_fc = mlp(
+            args.policy_head_channels,
+            args.policy_dense_layers,
+            2, #원래 1인데 두음법칙 고려해서
+            activation=nn.Identity
+        )
+
+    # Takes a torch_geometric.data.Data Object
+    # if it is a batch must be given as a torch_geometric.data.Batch
+    def forward(self, data: Data, batch_size):
+        #print(x)
+        #print(edge_index)
+        if self.gnn_type == "GAT":
+            x = self.GNNLayer(data.x, data.edge_index.to(torch.long), edge_attr=data.edge_attr.view(-1,1))
+        elif self.gnn_type == "GIN":
+            x = self.GNNLayer(data.x, data.edge_index)
+        x = self.CatLayers([data.x,x])
+        #if batch_size == 1:
+        #    print(x)
+        # If batching reshape x so that the the different graphs are seperate
+        x_size = list(x.size())
+        assert x_size[0] % batch_size == 0, f"Something has gone very wrong with batching {batch_size} graphs were inputed but the output contained a number of nodes that was not divisible by that; could be caused by inputing graphs of different sizes"
+        x = x.view(*([batch_size, x_size[0]//batch_size]+x_size[1:]))
+
+        #print(x.size())
+
+        x = self.LinearLayer(x)
+
+        v = self.v_fc(x)
+        #v = self.v_mean(v, batch=None) #head 취할 수 있을 듯
+        
 
         pi = self.pi_fc(x)
         pi = pi.view(batch_size, -1)

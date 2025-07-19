@@ -1,4 +1,4 @@
-from alphazero.NNetArchitecture import ResNet, FullyConnected, GraphNet
+from alphazero.NNetArchitecture import ResNet, FullyConnected, GraphNet, CustomGraphModel1
 from alphazero.pytorch_classification.utils import Bar, AverageMeter
 from alphazero.Game import GameState
 from alphazero.utils import dotdict
@@ -116,6 +116,8 @@ class NNetWrapper(BaseWrapper):
             self.nnet = FullyConnected(self.game_cls, args)
         elif args.nnet_type == 'graphnet':
             self.nnet = GraphNet(self.game_cls, args)
+        elif args.nnet_type == 'custom_graphmodel1':
+            self.nnet = CustomGraphModel1(self.game_cls, args)
         else:
             raise ValueError(f'Unknown NNet type "{args.nnet_type}"')
 
@@ -147,11 +149,39 @@ class NNetWrapper(BaseWrapper):
 
                 start = time.time()
                 self.current_step += 1
-                if self.args.nnet_type != "graphnet":
+                if self.args.nnet_type == "resnet":
                     boards, target_pis, target_vs = batch
-                else:
+                elif self.args.nnet_type == "graphnet":
                     xs, edges, target_pis, target_vs = batch
                     boards = geo_torch.data.Data(torch.cat([*xs]), torch.cat([*edges],-1))
+                elif self.args.nnet_type == "custom_graphmodel1":
+                    xs, edge_indices, edge_weights, edge_attrs, target_pis, target_vs = batch
+
+                    tensor_edge_index = torch.cat([*edge_indices],-1)
+                    tensor_edge_weight = torch.cat([*edge_weights])
+                    tensor_edge_attr = torch.cat([*edge_attrs])
+
+                    valid_edge_indices = tensor_edge_index[:, tensor_edge_weight != 0]
+                    valid_edge_attrs = tensor_edge_attr[tensor_edge_weight != 0]
+                    valid_edge_weights = tensor_edge_weight[tensor_edge_weight != 0]
+
+                    #print(tensor_edge_index.shape, valid_edge_indices.shape)
+                    
+                    boards = geo_torch.data.Data(torch.cat([*xs]), valid_edge_indices, 
+                                                 valid_edge_weights, valid_edge_attrs)
+
+ 
+                    """
+                    # 배치 내의 모든 그래프 데이터를 처리
+                    boards = geo_torch.data.Batch.from_data_list([
+                        geo_torch.data.Data(
+                            x=x,
+                            edge_index=ei,
+                            edge_weight=ew,
+                            edge_attr=ea
+                        ) for x, ei, ew, ea in zip(xs, edge_indices, edge_weights, edge_attrs)
+                    ])
+                    """
 
                 # predict
                 if self.args.cuda:
@@ -230,7 +260,7 @@ class NNetWrapper(BaseWrapper):
         # start = time.time()
 
         # preparing input
-        if self.args.nnet_type != "graphnet":
+        if self.args.nnet_type == "resnet":
             board = torch.FloatTensor(board.astype(np.float64))
         else:
             board.x = torch.FloatTensor(board.x.to(torch.float))
@@ -245,9 +275,11 @@ class NNetWrapper(BaseWrapper):
             return torch.exp(pi).data.cpu().numpy()[0], torch.exp(v).data.cpu().numpy()[0]
 
     def process(self, batch: Union[torch.Tensor, geo_torch.data.Batch], batch_size=1):
-        if self.args.nnet_type != "graphnet":
+        if self.args.nnet_type == "resnet":
             batch = batch.type(torch.FloatTensor)
-        else:
+        elif self.args.nnet_type == "graphnet":
+            batch.x = torch.FloatTensor(batch.x.to(torch.float))
+        elif self.args.nnet_type == "custom_graphmodel1":
             batch.x = torch.FloatTensor(batch.x.to(torch.float))
         if self.args.cuda:
             batch = batch.cuda()
@@ -285,7 +317,7 @@ class NNetWrapper(BaseWrapper):
             raise FileNotFoundError("No model in path {}".format(filepath))
 
 
-        checkpoint = torch.load(filepath)
+        checkpoint = torch.load(filepath, weights_only=False)
         args_saved = 'args' in checkpoint
         if use_saved_args and args_saved:
             self.args = checkpoint['args']

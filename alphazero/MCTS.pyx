@@ -21,6 +21,7 @@ NOISE_ALPHA_RATIO = 10.83
 _DRAW_VALUE = 0.5
 
 np.seterr(all='raise')
+#np.seterr(over='raise', divide='raise', invalid='raise', under='ignore')
 
 """
 def rebuild_node(children, a, cpuct, num_players, e, q, n, p, player):
@@ -218,9 +219,14 @@ cdef class MCTS:
 
     cpdef void _add_root_noise(self):
         cdef int num_valid_moves = len(self._root._children)
-        cdef float[:] noise = np.array(np.random.dirichlet(
-            [NOISE_ALPHA_RATIO / num_valid_moves] * num_valid_moves
-        ), dtype=np.float32)
+        cdef float[:] noise
+        try:
+            noise = np.array(np.random.dirichlet(
+                [NOISE_ALPHA_RATIO / num_valid_moves] * num_valid_moves
+            ), dtype=np.float32)
+        except FloatingPointError as e:
+            #print(f"FloatingPoint Error encountered: {e}. Noise follows uniform dist.")
+            noise = np.full(num_valid_moves, 1.0/num_valid_moves, dtype=np.float32)
         cdef Node c
         cdef float n
 

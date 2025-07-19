@@ -15,7 +15,7 @@ from torch_geometric.data import Data
 class SelfPlayAgent(mp.Process):
     def __init__(self, id, whoVwhoComputing, game_cls, ready_queue, batch_ready, batch_tensor, policy_tensor,
                  value_tensor, output_queue, result_queue, complete_count, games_played,
-                 stop_event: mp.Event, pause_event: mp.Event(), argss, *args, _is_arena=False, _is_warmup=False, _exact_game_count=False):
+                 stop_event: mp.Event, save_event: mp.Event, pause_event: mp.Event(), argss, *args, _is_arena=False, _is_warmup=False, _exact_game_count=False):
         super().__init__()
         #print(_is_arena)
         self.id = id
@@ -29,8 +29,13 @@ class SelfPlayAgent(mp.Process):
         self.ready_queue = ready_queue
         self.batch_ready = batch_ready
         self.batch_tensor = batch_tensor
-        if args:
-            self.batch_tensor2 = args[0]
+        if not _is_arena:
+            if argss.nnet_type != 'resnet':
+                self.batch_tensor2 = args[0]
+            if argss.nnet_type == 'custom_graphmodel1':
+                self.batch_tensor3 = args[1]
+                self.batch_tensor4 = args[2]
+                
         #self.batch_queue = batch_queue
         
         #if _is_arena:
@@ -52,6 +57,7 @@ class SelfPlayAgent(mp.Process):
         self.complete_count = complete_count
         self.stop_event = stop_event
         self.pause_event = pause_event
+        self.save_event = save_event
         self.args = argss
         #print(self.args)
 
@@ -165,28 +171,40 @@ class SelfPlayAgent(mp.Process):
             np.random.seed()
             while not self.stop_event.is_set() and self.games_played.value < self.args.gamesPerIteration and not(self._exact_game_count and len(self.games) == 0):
                 self._check_pause()
+                #print("yaho")
                 self.fast = np.random.random_sample() < self.args.probFastSim
+                
                 sims = self.args.numFastSims if self.fast else self.args.numMCTSSims \
                     if not self._is_warmup else self.args.numWarmupSims
+
                 for _ in range(sims):
+                    #print(f'{self.id} sims: {_} generateBatch')
                     if self.stop_event.is_set(): break
                     self.generateBatch()
                     if self.stop_event.is_set(): break
+                    #print(f'{self.id} sims: {_} processBatch')
                     self.processBatch()
 
                 #print("readytodorealmove")
 
                 if self.stop_event.is_set(): break
+                #print(f'{self.id} sims: playMoves')
+                #print(self.games_played.value, self.stop_event.is_set(), self._exact_game_count, len(self.games))
                 self.playMoves()
+                
                 self.whichPlayerNext = (self.whichPlayerNext + 1)%self.numPlayers
+                #print(f'{self.id} sims: playMoves done for one iteration')
 
             with self.complete_count.get_lock():
                 self.complete_count.value += 1
             if not self._is_arena:
-                self.output_queue.close()
-                self.output_queue.join_thread()
+                self.save_event.wait()
+                #self.output_queue.close()
+                #self.output_queue.join_thread()
         except Exception:
+            #except 발생 사유 출력하는 코드
             print(traceback.format_exc())
+            
 
     def generateBatch(self):
         if self._is_arena:
@@ -194,27 +212,32 @@ class SelfPlayAgent(mp.Process):
             self.batch_indices = [[] for _ in range(self.game_cls.num_players())]
 
         for i in range(len(self.games)):
+            #print(f'{self.id} sims: {i} games')
             self._check_pause()
             state = self._mcts(i).find_leaf(self.games[i])
             if self._is_warmup:
                 self.policy_tensor[i].copy_(self._WARMUP_POLICY)
                 self.value_tensor[i].copy_(self._WARMUP_VALUE)
                 continue
-            if self.args.nnet_type != "graphnet":
+            if self.args.nnet_type == "resnet":
                 data = torch.from_numpy(state.observation())
-            else:
+            elif self.args.nnet_type == "graphnet":
+                data = state.observation()
+            elif self.args.nnet_type == "custom_graphmodel1":
                 data = state.observation()
 
             if self._is_arena:
-                if self.args.nnet_type != "graphnet":
+                if self.args.nnet_type == "resnet":
                     data = data.view(-1, *state.observation_size())
                 player = self.player_to_index[self.games[i].player]
+                #if self.args.nnet_type == "custom_graphmodel1":
+                #    data.x = torch.from_numpy(data.x)
                 batch_tensor[player].append(data)
                 self.batch_indices[player].append(i)
             else:
-                if self.args.nnet_type != "graphnet":
+                if self.args.nnet_type == "resnet":
                     self.batch_tensor[i].copy_(data)
-                else:
+                elif self.args.nnet_type == "graphnet":
                     self.batch_tensor[i].copy_(data.x)
                     self.batch_tensor2[i].copy_(data.edge_index)
                     #print(data)
@@ -222,6 +245,15 @@ class SelfPlayAgent(mp.Process):
                     #data.share_memory_()
                     #self.batch_tensor[i].x = (data.x)
                     #self.batch_tensor[i].edge_index = (data.edge_index)
+                elif self.args.nnet_type == "custom_graphmodel1":
+                    #print("진실은")
+                    self.batch_tensor[i].copy_(data.x)
+                    #print("언제나 하나!")
+                    self.batch_tensor2[i].copy_(data.edge_index)
+                    self.batch_tensor3[i].copy_(data.edge_weight)
+                    self.batch_tensor4[i].copy_(data.edge_attr)
+
+
 
                 #batch_tensor.append(data)
                 #self.batch_tensor[i].copy_(data)
@@ -230,11 +262,12 @@ class SelfPlayAgent(mp.Process):
             for player in range(self.game_cls.num_players()):
                 player = self.player_to_index[player]
                 data = batch_tensor[player]
-                if self.args.nnet_type != "graphnet" and data != []:
+                if self.args.nnet_type == "resnet" and data != []:
                     data = torch.cat(data)
                 if data != []:
                     batch_tensor[player] = data
             self.output_queue.put(batch_tensor)
+            
             self.batch_indices = list(itertools.chain.from_iterable(self.batch_indices))
         #elif self.args.nnet_type == "graphnet":
             #print(self.batch_queue)
@@ -274,6 +307,7 @@ class SelfPlayAgent(mp.Process):
         toRem = []
 
         for i in range(len(self.games)):
+            #print(i)
             self._check_pause()
             self.temps[i] = self.args.temp_scaling_fn(
                 self.temps[i], self.games[i].turns, self.game_cls.max_turns()
@@ -281,6 +315,7 @@ class SelfPlayAgent(mp.Process):
             #print(self.temps[i])
             #print()
             #print(self._mcts(i), self.games[i], self.temps[i])
+            #print(f'{self.id} calculating policy')
             policy = self._mcts(i).probs(self.games[i], self.temps[i])
             action = np.random.choice(self.games[i].action_size(), p=policy)
             if not self.fast and not self._is_arena:
@@ -288,18 +323,19 @@ class SelfPlayAgent(mp.Process):
                     self.games[i].clone(),
                     self._mcts(i).probs(self.games[i])
                 ))
-
+            #print(f'{self.id} updating root')
             _ = [mcts.update_root(self.games[i], action) for mcts in self.mcts[i][1]]
-
+            #print(f'{self.id} playing action')
             self.games[i].play_action(action)
             if self.args.mctsResetThreshold and self.games[i].turns >= self.next_reset[i]:
                 self.mcts[i] = self._get_mcts()
                 self.next_reset[i] = self.games[i].turns + self.args.mctsResetThreshold
-
+            #print(f'{self.id} getting winstate at {i}')
             winstate = self.games[i].win_state()
             #print(winstate)
             if winstate.any():
                 #print(i)
+                #print(f'{self.id} putting winstate')
                 self.result_queue.put((self.games[i].clone(), winstate, self.id, self.listToCompute[self.getNetIndex(i)]))
                 lock = self.games_played.get_lock()
                 lock.acquire()
@@ -307,6 +343,7 @@ class SelfPlayAgent(mp.Process):
                     self.games_played.value += 1
                     lock.release()
                     if not self._is_arena:
+                        #print(f'{self.id} started putting output queue')
                         for hist in self.histories[i]:
                             self._check_pause()
                             if self.args.symmetricSamples:
@@ -314,22 +351,34 @@ class SelfPlayAgent(mp.Process):
                             else:
                                 data = ((hist[0], hist[1], winstate),)
 
+                            #print(data)
+
                             for state, pi, true_winstate in data:
                                 self._check_pause()
+                                #print(f'{self.id} putting output queue: casuing error')
+                                #import joblib
+                                #joblib.dump(state, 'alphazero/tmp/whathappened.pkl')
+                                #obs = state.observation()
                                 self.output_queue.put((
-                                    state.observation(), pi, np.array(true_winstate, dtype=np.float32)
+                                    state.observation(), pi, np.array(true_winstate, dtype=np.float32) #범인
                                 ))
-
+                                #print('uayyyy')
+                    #print(f'{self.id} putting output queue done')
+    
                     toRem.append(i)
+                    #print(f'{self.id} {toRem}')
                 else:
                     lock.release()
-
+        #self.save_event.wait()
         toRem.reverse()
+        #print(f'{self.id} -- {toRem}')
         for i in toRem:
+            #print(f'{self.id} removing game {i}')
             self.removeFromComputing(i)
 
         # To ensure that all games are played in the correct order (i.e with the first player 
         #  in the tuple acting first)
         if self.whichPlayerNext == 0 or self._is_arena:
             for _ in range(self.batch_size - len(self.games)):
+                #print(f'{self.id} adding next to compute')
                 self.addNextToCompute()
